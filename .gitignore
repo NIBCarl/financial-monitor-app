@@ -36,6 +36,19 @@ yarn-error.*
 # typescript
 *.tsbuildinfo
 
+# verification harness build output (scripts/verify-money-logic.cjs)
+.verify-tmp/
+
+# relocated template scaffolding (safe to delete once you are happy)
+.template-backup/
+
+# local export/build scratch dirs and downloaded APKs
+.baseline-export/
+.optimized-export/
+.webcheck/
+.webcheck2/
+*.apk
+
 example
 
 # generated native folders
