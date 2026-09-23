@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert } from 'react-native';
 import {
   ShieldCheck,
@@ -23,7 +23,7 @@ import {
 import type { LedgerSeal } from '../db/repositories/sealRepo';
 import { exportMonthlyReportPdf } from '../services/pdfService';
 import { formatDbDateTime } from '../utils/financial';
-import { useAppStore } from '../stores/useAppStore';
+import { useScopedReload } from '../hooks/use-scoped-reload';
 
 interface IntegrityPanelProps {
   orgName: string;
@@ -47,7 +47,6 @@ export const IntegrityPanel: React.FC<IntegrityPanelProps> = ({
   currencySymbol,
   onChanged,
 }) => {
-  const refreshKey = useAppStore((s) => s.refreshKey);
   const [busy, setBusy] = useState<Busy>(null);
   const [chain, setChain] = useState<ChainVerification | null>(null);
   const [books, setBooks] = useState<BooksCheckResult | null>(null);
@@ -66,26 +65,9 @@ export const IntegrityPanel: React.FC<IntegrityPanelProps> = ({
     setSealChecks(checks);
   }, []);
 
-  // Loads on mount and whenever the book changes. The work happens after an await, and a
-  // cancelled flag stops a slow check from writing state into an unmounted panel.
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const rows = await listSeals();
-      if (cancelled) return;
-      setSeals(rows);
-
-      const checks: Record<string, SealVerification> = {};
-      for (const seal of rows.slice(0, 3)) {
-        checks[seal.id] = await verifySeal(seal);
-        if (cancelled) return;
-      }
-      setSealChecks(checks);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshKey]);
+  // Seals only change when one is published, or when the book is restored/wiped — both of which
+  // bump the evidence/settings scopes. It no longer re-reads itself on every payment.
+  useScopedReload(['evidence', 'settings'], loadSeals);
 
   const handleVerifyChain = async () => {
     try {

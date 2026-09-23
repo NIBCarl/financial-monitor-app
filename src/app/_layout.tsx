@@ -5,6 +5,7 @@ import { useColorScheme, Platform, AppState } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as SplashScreen from 'expo-splash-screen';
 import { getDatabase, optimizeDatabase } from '../db/client';
+import { runAutoBackupIfDue } from '../services/backupService';
 import { settingsRepo } from '../db/repositories/settingsRepo';
 import { useAppStore } from '../stores/useAppStore';
 
@@ -65,6 +66,13 @@ function TabLayout() {
       if (state === 'background') {
         // Refresh the query planner statistics while the app is not in use.
         void optimizeDatabase().catch(() => {});
+        // And take the day's backup on the way out, so a phone that is used daily is never more
+        // than a day behind without the treasurer doing anything (§20.9). Both calls are gated
+        // internally (cadence, "nothing changed", empty book), so this is cheap when there is
+        // nothing to do.
+        void runAutoBackupIfDue().catch((err) => {
+          console.warn('Background backup skipped:', err);
+        });
       }
     });
 

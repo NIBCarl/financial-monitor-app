@@ -13,6 +13,7 @@ const signature = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'si
 const backupPolicy = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'backup.js'));
 const secrets = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'secrets.js'));
 const tables = require(path.join(__dirname, '..', '.verify-tmp', 'db', 'tables.js'));
+const dbRetry = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'dbRetry.js'));
 
 const { parseMoney, parsePositiveMoney, parseTermCount, parseInterestRate, round2, sanitizePhoneForUri, csvCell, csvRow, MAX_MONEY } = validation;
 const {
@@ -61,6 +62,13 @@ const {
   serialiseBackupTables,
 } = backupPolicy;
 const { stripDeviceSecrets, planReceiptSecret, DEVICE_SECRET_SETTING_KEYS } = secrets;
+const {
+  MAX_WRITE_ATTEMPTS,
+  WRITE_RETRY_DELAYS_MS,
+  isDatabaseLocked,
+  retryDelayMs,
+  shouldRetryWrite,
+} = dbRetry;
 const { TABLE_SPECS, BACKUP_TABLE_ORDER, tablesOfKind, isEvidenceTable, countTables } = tables;
 
 let passed = 0;
@@ -909,6 +917,45 @@ check('a fresh device gets a generated secret, and blank values never win', () =
 
   assert.strictEqual(planReceiptSecret('   ', '  ', 'g').secret, 'g');
   assert.strictEqual(planReceiptSecret('  spaced  ', null, 'g').secret, 'spaced');
+});
+
+/* ------------------------------------------------------ write-lock retry policy (expo-sqlite) */
+
+check('a locked database is recognised however the driver phrases it', () => {
+  assert.strictEqual(isDatabaseLocked(new Error('database is locked')), true);
+  assert.strictEqual(isDatabaseLocked(new Error('SQLITE_BUSY: database is locked')), true);
+  assert.strictEqual(isDatabaseLocked(new Error('Database is Locked')), true);
+  assert.strictEqual(isDatabaseLocked(new Error('database table is locked')), true);
+  // A string or a foreign value must not be mistaken for a lock.
+  assert.strictEqual(isDatabaseLocked('SQLITE_BUSY'), true);
+  assert.strictEqual(isDatabaseLocked(new Error('no such table: signatures')), false);
+  assert.strictEqual(isDatabaseLocked(new Error('UNIQUE constraint failed: loans.id')), false);
+  assert.strictEqual(isDatabaseLocked(undefined), false);
+  assert.strictEqual(isDatabaseLocked(null), false);
+  assert.strictEqual(isDatabaseLocked({ code: 'SQLITE_BUSY' }), false);
+});
+
+check('a lock is retried, but a real error is not', () => {
+  assert.strictEqual(shouldRetryWrite(1, new Error('database is locked')), true);
+  assert.strictEqual(shouldRetryWrite(MAX_WRITE_ATTEMPTS - 1, new Error('database is locked')), true);
+  // Out of attempts: the caller gets the error instead of a write that never happens.
+  assert.strictEqual(shouldRetryWrite(MAX_WRITE_ATTEMPTS, new Error('database is locked')), false);
+  // A constraint failure would fail identically every time, so retrying only delays the report.
+  assert.strictEqual(shouldRetryWrite(1, new Error('UNIQUE constraint failed: loans.id')), false);
+});
+
+check('retry delays grow and stay short', () => {
+  assert.strictEqual(retryDelayMs(0), 0);
+  assert.strictEqual(retryDelayMs(1), 0);
+  assert.strictEqual(retryDelayMs(2), WRITE_RETRY_DELAYS_MS[0]);
+  assert.strictEqual(retryDelayMs(3), WRITE_RETRY_DELAYS_MS[1]);
+  // The last delay repeats rather than growing without bound.
+  assert.strictEqual(retryDelayMs(99), WRITE_RETRY_DELAYS_MS[WRITE_RETRY_DELAYS_MS.length - 1]);
+  assert.ok(WRITE_RETRY_DELAYS_MS.length >= MAX_WRITE_ATTEMPTS - 1);
+
+  // A treasurer's payment must never be paused for a noticeable time.
+  const total = WRITE_RETRY_DELAYS_MS.slice(0, MAX_WRITE_ATTEMPTS - 1).reduce((a, b) => a + b, 0);
+  assert.ok(total < 600, `retry budget is ${total}ms`);
 });
 
 console.log(`\n${passed} checks passed${process.exitCode ? ' (WITH FAILURES)' : ' — all good'}\n`);

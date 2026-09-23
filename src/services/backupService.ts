@@ -142,12 +142,14 @@ export interface StoredBackup {
 }
 
 export interface AutoBackupOutcome {
-  /** False when the cadence says "not yet" (or the app was already backed up today). */
+  /** False when nothing was written. */
   created: boolean;
   summary: BackupSummary | null;
   lastBackupAt: string;
   ageLabel: string;
   stale: boolean;
+  /** Why nothing was written, when nothing was. */
+  skippedBecause?: 'recent' | 'unchanged' | 'empty';
 }
 
 /** The folder the app's own rotating backups live in (kept out of the documents root). */
@@ -254,31 +256,31 @@ export async function runAutoBackupIfDue(): Promise<AutoBackupOutcome> {
   const lastBackupAt = await getLastBackupAt();
   const now = new Date();
 
-  if (!isAutoBackupDue(lastBackupAt, now)) {
-    return {
-      created: false,
-      summary: null,
-      lastBackupAt: lastBackupAt ?? '',
-      ageLabel: describeBackupAge(lastBackupAt, now),
-      stale: isBackupStale(lastBackupAt, now),
-    };
+  const skip = (skippedBecause: AutoBackupOutcome['skippedBecause']): AutoBackupOutcome => ({
+    created: false,
+    summary: null,
+    lastBackupAt: lastBackupAt ?? '',
+    ageLabel: describeBackupAge(lastBackupAt, now),
+    stale: isBackupStale(lastBackupAt, now),
+    skippedBecause,
+  });
+
+  if (!isAutoBackupDue(lastBackupAt, now)) return skip('recent');
+
+  // Nothing has changed since the last copy, so a new one would be a byte-for-byte duplicate that
+  // only pushes a genuinely useful version out of the rotation.
+  if (lastBackupAt && (await getChangeMarker()) === (await settingsRepo.get('last_backup_marker'))) {
+    return skip('unchanged');
   }
 
-  // An empty book is not worth a rotation slot: after a deliberate wipe, automatic backups of an
-  // empty database would otherwise evict the copies that still hold the erased records — the very
-  // files the treasurer would want to restore from.
-  if (!(await hasAnyRecords())) {
-    return {
-      created: false,
-      summary: null,
-      lastBackupAt: lastBackupAt ?? '',
-      ageLabel: describeBackupAge(lastBackupAt, now),
-      stale: isBackupStale(lastBackupAt, now),
-    };
-  }
+  // An empty book is not worth a rotation slot either: after a deliberate wipe, automatic backups
+  // of an empty database would otherwise evict the copies that still hold the erased records — the
+  // very files the treasurer would want to restore from.
+  if (!(await hasAnyRecords())) return skip('empty');
 
   const summary = await createAutoBackup();
   await settingsRepo.set('last_backup_at', summary.generatedAt);
+  await settingsRepo.set('last_backup_marker', await getChangeMarker());
 
   return {
     created: true,
@@ -287,6 +289,25 @@ export async function runAutoBackupIfDue(): Promise<AutoBackupOutcome> {
     ageLabel: describeBackupAge(summary.generatedAt, now),
     stale: false,
   };
+}
+
+/**
+ * A cheap fingerprint of the book's contents.
+ *
+ * Every write in this app goes through the audit trail, so the newest audit row is a reliable
+ * "has anything happened since" marker — one indexed scalar read, no table scans.
+ */
+export async function getChangeMarker(): Promise<string> {
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<{ marker: string | null }>(`
+    SELECT (
+      (SELECT COALESCE(MAX(rowid), 0) FROM audit_log) || ':' ||
+      (SELECT COUNT(*) FROM loan_payments) || ':' ||
+      (SELECT COUNT(*) FROM ledger_transactions) || ':' ||
+      (SELECT COUNT(*) FROM signatures)
+    ) as marker
+  `);
+  return row?.marker ?? '0:0:0:0';
 }
 
 /** Restores from one of the device's own rotating backups, after the caller confirms. */

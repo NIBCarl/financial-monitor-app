@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Search, UserPlus, X } from 'lucide-react-native';
 import { BorrowerCard } from '../components/BorrowerCard';
+import { LoadErrorBanner } from '../components/LoadErrorBanner';
+import { useScopedReload } from '../hooks/use-scoped-reload';
 import { AddBorrowerModal } from '../components/AddBorrowerModal';
 import { BorrowerDetailModal } from '../components/BorrowerDetailModal';
 import { borrowerRepo } from '../db/repositories/borrowerRepo';
@@ -21,12 +23,14 @@ import { useAppStore } from '../stores/useAppStore';
 import { useDebouncedValue } from '../hooks/use-debounced-value';
 
 export default function BorrowersScreen() {
-  const { currencySymbol, organizationName, refreshKey, triggerRefresh } = useAppStore();
+  const { currencySymbol, organizationName, triggerRefresh } = useAppStore();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('ALL');
   const [borrowers, setBorrowers] = useState<Borrower[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  /** Set when a load fails, so the screen can say so instead of showing an empty book. */
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Debounced so typing does not run a SQLite query + full list re-render per keystroke.
   const debouncedQuery = useDebouncedValue(searchQuery);
@@ -40,14 +44,15 @@ export default function BorrowersScreen() {
     try {
       const data = await borrowerRepo.getAll(debouncedQuery, filterStatus);
       setBorrowers(data);
+      setLoadError(null);
     } catch (err) {
       console.error('Failed to load borrowers:', err);
+      setLoadError(err instanceof Error ? err.message : 'The database did not respond.');
     }
   }, [debouncedQuery, filterStatus]);
 
-  useEffect(() => {
-    loadBorrowers();
-  }, [loadBorrowers, refreshKey]);
+  // The directory lists borrowers with their outstanding balances, so it depends on both scopes.
+  useScopedReload(['borrowers', 'loans'], loadBorrowers);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -72,7 +77,7 @@ export default function BorrowersScreen() {
 
   const handleNewBorrowerSuccess = async (newId: string) => {
     setAddModalVisible(false);
-    triggerRefresh();
+    triggerRefresh(['borrowers']);
     const created = await borrowerRepo.getById(newId);
     if (created) {
       setSelectedBorrower(created);
@@ -110,6 +115,18 @@ export default function BorrowersScreen() {
             <Text style={styles.addBtnText}>Add Profile</Text>
           </TouchableOpacity>
         </View>
+
+        {/* A failed load must be visible, not an empty directory (see LoadErrorBanner) */}
+        {loadError ? (
+          <View style={styles.bannerWrap}>
+            <LoadErrorBanner
+              what="the borrower directory"
+              detail={loadError}
+              retrying={refreshing}
+              onRetry={() => void onRefresh()}
+            />
+          </View>
+        ) : null}
 
         {/* Search Bar */}
         <View style={styles.searchContainer}>
@@ -200,7 +217,7 @@ export default function BorrowersScreen() {
         visible={detailModalVisible}
         borrower={selectedBorrower}
         onClose={() => setDetailModalVisible(false)}
-        onDataChanged={triggerRefresh}
+        onDataChanged={() => triggerRefresh(['borrowers', 'loans', 'ledger'])}
         currencySymbol={currencySymbol}
         orgName={organizationName}
       />
@@ -259,6 +276,10 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
     color: '#ffffff',
+  },
+  bannerWrap: {
+    paddingHorizontal: 16,
+    marginTop: 10,
   },
   searchContainer: {
     flexDirection: 'row',

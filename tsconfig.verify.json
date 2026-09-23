@@ -17,6 +17,7 @@
     "src/utils/signature.ts",
     "src/utils/backup.ts",
     "src/utils/secrets.ts",
+    "src/utils/dbRetry.ts",
     "src/db/tables.ts",
     "src/utils/financial.ts",
     "src/utils/reminderText.ts",

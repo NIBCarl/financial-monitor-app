@@ -33,6 +33,8 @@ import { AddLedgerModal } from '../components/AddLedgerModal';
 import { BorrowerDetailModal } from '../components/BorrowerDetailModal';
 import { PaymentModal } from '../components/PaymentModal';
 import { ShareableReceiptModal } from '../components/ShareableReceiptModal';
+import { LoadErrorBanner } from '../components/LoadErrorBanner';
+import { useScopedReload } from '../hooks/use-scoped-reload';
 import { TransactionDetailModal } from '../components/TransactionDetailModal';
 import { DueSoonCard } from '../components/DueSoonCard';
 import { reportsRepo, type DueItem } from '../db/repositories/reportsRepo';
@@ -62,7 +64,7 @@ import { runAutoBackupIfDue } from '../services/backupService';
 import { sharePaymentReminder } from '../services/receiptService';
 
 export default function DashboardScreen() {
-  const { currencySymbol, organizationName, refreshKey, triggerRefresh } = useAppStore();
+  const { currencySymbol, organizationName, triggerRefresh } = useAppStore();
 
   const [metrics, setMetrics] = useState<DashboardMetrics>({
     liquidCash: 0,
@@ -107,6 +109,9 @@ export default function DashboardScreen() {
   // Installments due within the week (or already late) — drives the reminders card.
   const [dueItems, setDueItems] = useState<DueItem[]>([]);
 
+  /** Set when a load fails, so the screen can say so instead of showing zeros. */
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   // Backup health, shown as a nag when the book has gone too long without a copy.
   const [backupAgeLabel, setBackupAgeLabel] = useState('');
   const [backupStale, setBackupStale] = useState(false);
@@ -123,14 +128,18 @@ export default function DashboardScreen() {
       setSchedules(scheds);
       setCollections(recentCollections);
       setDueItems(dueItems);
+      setLoadError(null);
     } catch (err) {
       console.error('Failed to load dashboard data:', err);
+      // A failed load used to leave every card at its initial (zero) value, which reads as
+      // "the records are gone". Say what happened instead.
+      setLoadError(err instanceof Error ? err.message : 'The database did not respond.');
     }
   }, []);
 
-  useEffect(() => {
-    loadDashboardData();
-  }, [loadDashboardData, refreshKey]);
+  // The dashboard shows money and due installments, so it reloads for those two scopes only —
+  // and only while it is the tab on screen.
+  useScopedReload(['ledger', 'loans'], loadDashboardData);
 
   /**
    * The app backs itself up (report §20.9).
@@ -155,9 +164,15 @@ export default function DashboardScreen() {
       }
     };
 
-    void checkBackup();
+    // Deferred, because writing a backup reads every table and serialises the whole book: it must
+    // not compete with the first paint (RN performance guidance — do this when the JS thread is
+    // idle). The app also checks again when it is backgrounded, which is the natural "end of the
+    // day's work" moment.
+    const timer = setTimeout(() => void checkBackup(), 1500);
+
     return () => {
       active = false;
+      clearTimeout(timer);
     };
   }, []);
 
@@ -203,7 +218,8 @@ export default function DashboardScreen() {
     setTimeout(() => {
       setCurrentReceipt(receipt);
       setReceiptModalVisible(true);
-      triggerRefresh();
+      // A payment moves cash and the loan's balance; nothing else on this screen changed.
+      triggerRefresh(['ledger', 'loans']);
     }, Platform.OS === 'ios' ? 350 : 50);
   };
 
@@ -239,6 +255,16 @@ export default function DashboardScreen() {
             </Text>
           </View>
         </View>
+
+        {/* A failed load must be visible: zeroed cards look like lost records (see LoadErrorBanner) */}
+        {loadError ? (
+          <LoadErrorBanner
+            what="the dashboard figures"
+            detail={loadError}
+            retrying={refreshing}
+            onRetry={() => void onRefresh()}
+          />
+        ) : null}
 
         {/* Backup nag: the book has gone long enough without a copy to say so (report §20.9) */}
         {backupStale ? (
@@ -496,7 +522,7 @@ export default function DashboardScreen() {
         onClose={() => setAddBorrowerVisible(false)}
         onSuccess={(id) => {
           setAddBorrowerVisible(false);
-          triggerRefresh();
+          triggerRefresh(['borrowers']);
           handleBorrowerSelected(id);
         }}
       />
@@ -507,7 +533,7 @@ export default function DashboardScreen() {
         onClose={() => setIssueLoanVisible(false)}
         onSuccess={() => {
           setIssueLoanVisible(false);
-          triggerRefresh();
+          triggerRefresh(['loans']);
         }}
         currencySymbol={currencySymbol}
       />
@@ -517,7 +543,7 @@ export default function DashboardScreen() {
         onClose={() => setAddLedgerVisible(false)}
         onSuccess={() => {
           setAddLedgerVisible(false);
-          triggerRefresh();
+          triggerRefresh(['ledger']);
         }}
         currencySymbol={currencySymbol}
       />
@@ -526,7 +552,7 @@ export default function DashboardScreen() {
         visible={borrowerDetailVisible}
         borrower={selectedBorrower}
         onClose={() => setBorrowerDetailVisible(false)}
-        onDataChanged={triggerRefresh}
+        onDataChanged={() => triggerRefresh(['borrowers', 'loans', 'ledger'])}
         currencySymbol={currencySymbol}
         orgName={organizationName}
       />
@@ -560,7 +586,7 @@ export default function DashboardScreen() {
         currencySymbol={currencySymbol}
         orgName={organizationName}
         onOpenBorrower={handleBorrowerSelected}
-        onChanged={triggerRefresh}
+        onChanged={() => triggerRefresh('all')}
       />
     </SafeAreaView>
   );

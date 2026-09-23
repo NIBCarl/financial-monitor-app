@@ -74,7 +74,11 @@ export const reportsRepo = {
   async getAgingSchedule(soonDays: number = 7): Promise<AgingRow[]> {
     const db = await getDatabase();
 
-    const overdue = await db.getAllAsync<{
+    // One scan of the unpaid installments produces every bucket: overdue by age, then what is due
+    // inside the next `soonDays`, then everything later. This used to be two near-identical scans
+    // (one for the overdue buckets, one for the upcoming ones), and this screen loads on every
+    // money change.
+    const rows = await db.getAllAsync<{
       bucket: string;
       installmentCount: number;
       borrowerCount: number;
@@ -82,10 +86,15 @@ export const reportsRepo = {
     }>(
       `SELECT
         CASE
-          WHEN CAST(julianday(date('now', 'localtime')) - julianday(s.due_date) AS INTEGER) <= 30 THEN '1-30'
-          WHEN CAST(julianday(date('now', 'localtime')) - julianday(s.due_date) AS INTEGER) <= 60 THEN '31-60'
-          WHEN CAST(julianday(date('now', 'localtime')) - julianday(s.due_date) AS INTEGER) <= 90 THEN '61-90'
-          ELSE '90+'
+          WHEN s.due_date < date('now', 'localtime') THEN
+            CASE
+              WHEN CAST(julianday(date('now', 'localtime')) - julianday(s.due_date) AS INTEGER) <= 30 THEN '1-30'
+              WHEN CAST(julianday(date('now', 'localtime')) - julianday(s.due_date) AS INTEGER) <= 60 THEN '31-60'
+              WHEN CAST(julianday(date('now', 'localtime')) - julianday(s.due_date) AS INTEGER) <= 90 THEN '61-90'
+              ELSE '90+'
+            END
+          WHEN s.due_date <= date('now', 'localtime', ?) THEN 'DUE_SOON'
+          ELSE 'CURRENT'
         END as bucket,
         COUNT(*) as installmentCount,
         COUNT(DISTINCT l.borrower_id) as borrowerCount,
@@ -94,32 +103,12 @@ export const reportsRepo = {
       JOIN loans l ON l.id = s.loan_id
       WHERE s.status != 'PAID'
         AND s.expected_amount > s.paid_amount
-        AND s.due_date < date('now', 'localtime')
-      GROUP BY bucket`
-    );
-
-    const upcoming = await db.getAllAsync<{
-      bucket: string;
-      installmentCount: number;
-      borrowerCount: number;
-      amount: number;
-    }>(
-      `SELECT
-        CASE WHEN s.due_date <= date('now', 'localtime', ?) THEN 'DUE_SOON' ELSE 'CURRENT' END as bucket,
-        COUNT(*) as installmentCount,
-        COUNT(DISTINCT l.borrower_id) as borrowerCount,
-        COALESCE(SUM(s.expected_amount - s.paid_amount), 0) as amount
-      FROM loan_schedules s
-      JOIN loans l ON l.id = s.loan_id
-      WHERE s.status != 'PAID'
-        AND s.expected_amount > s.paid_amount
-        AND s.due_date >= date('now', 'localtime')
       GROUP BY bucket`,
       [`+${soonDays} day`]
     );
 
     const byBucket = new Map<string, AgingRow>();
-    for (const row of [...overdue, ...upcoming]) {
+    for (const row of rows) {
       byBucket.set(row.bucket, {
         bucket: row.bucket as AgingBucket,
         installmentCount: Number(row.installmentCount ?? 0),

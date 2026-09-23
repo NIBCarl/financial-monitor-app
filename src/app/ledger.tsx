@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -17,6 +17,8 @@ import {
   ChevronRight,
 } from 'lucide-react-native';
 import { AddLedgerModal } from '../components/AddLedgerModal';
+import { LoadErrorBanner } from '../components/LoadErrorBanner';
+import { useScopedReload } from '../hooks/use-scoped-reload';
 import { BorrowerDetailModal } from '../components/BorrowerDetailModal';
 import { TransactionDetailModal } from '../components/TransactionDetailModal';
 import { borrowerRepo } from '../db/repositories/borrowerRepo';
@@ -92,7 +94,7 @@ const LedgerTransactionRow = React.memo(
 LedgerTransactionRow.displayName = 'LedgerTransactionRow';
 
 export default function LedgerScreen() {
-  const { currencySymbol, organizationName, refreshKey, triggerRefresh } = useAppStore();
+  const { currencySymbol, organizationName, triggerRefresh } = useAppStore();
 
   const [transactions, setTransactions] = useState<LedgerTransaction[]>([]);
   const [filterType, setFilterType] = useState<string>('ALL');
@@ -101,6 +103,8 @@ export default function LedgerScreen() {
   const [cashBalance, setCashBalance] = useState(0);
   const [totalInflows, setTotalInflows] = useState(0);
   const [totalOutflows, setTotalOutflows] = useState(0);
+  /** Set when a load fails, so the screen can say so instead of showing an empty book. */
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Voucher detail + borrower profile modals
   const [detailVisible, setDetailVisible] = useState(false);
@@ -118,14 +122,15 @@ export default function LedgerScreen() {
       setCashBalance(metrics.liquidCash);
       setTotalInflows(metrics.totalInflows);
       setTotalOutflows(metrics.totalOutflows);
+      setLoadError(null);
     } catch (err) {
       console.error('Failed to load ledger:', err);
+      setLoadError(err instanceof Error ? err.message : 'The database did not respond.');
     }
   }, []);
 
-  useEffect(() => {
-    loadLedger();
-  }, [loadLedger, refreshKey]);
+  // The ledger shows the transaction stream and the cash position: purely ledger-scoped.
+  useScopedReload(['ledger'], loadLedger);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -216,6 +221,18 @@ export default function LedgerScreen() {
           </Text>
         </View>
 
+        {/* A failed load must be visible, not an empty book (see LoadErrorBanner) */}
+        {loadError ? (
+          <View style={styles.bannerWrap}>
+            <LoadErrorBanner
+              what="the ledger"
+              detail={loadError}
+              retrying={refreshing}
+              onRetry={() => void onRefresh()}
+            />
+          </View>
+        ) : null}
+
         {/* Filter Tabs */}
         <View style={styles.filterRow}>
           {[
@@ -276,7 +293,7 @@ export default function LedgerScreen() {
         onClose={() => setAddModalVisible(false)}
         onSuccess={() => {
           setAddModalVisible(false);
-          triggerRefresh();
+          triggerRefresh(['ledger']);
         }}
         currencySymbol={currencySymbol}
       />
@@ -289,7 +306,7 @@ export default function LedgerScreen() {
         currencySymbol={currencySymbol}
         orgName={organizationName}
         onOpenBorrower={handleOpenBorrower}
-        onChanged={triggerRefresh}
+        onChanged={() => triggerRefresh('all')}
       />
 
       {/* Borrower profile opened from the detail modal */}
@@ -297,7 +314,7 @@ export default function LedgerScreen() {
         visible={borrowerDetailVisible}
         borrower={selectedBorrower}
         onClose={() => setBorrowerDetailVisible(false)}
-        onDataChanged={triggerRefresh}
+        onDataChanged={() => triggerRefresh(['borrowers', 'loans', 'ledger'])}
         currencySymbol={currencySymbol}
         orgName={organizationName}
       />
@@ -433,6 +450,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     gap: 8,
     marginBottom: 10,
+  },
+  bannerWrap: {
+    paddingHorizontal: 16,
   },
   filterTab: {
     flex: 1,

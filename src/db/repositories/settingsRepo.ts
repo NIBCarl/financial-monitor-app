@@ -12,6 +12,8 @@ export type SettingKey =
   | 'currency_symbol'
   | 'org_name'
   | 'last_backup_at'
+  /** Fingerprint of the book when the last backup was written (see `backupService`). */
+  | 'last_backup_marker'
   /**
    * Legacy home of the receipt signing secret. It now lives in the OS keystore (see
    * `services/receiptService` and `utils/secrets`); this key is still read once so an upgrade
@@ -24,6 +26,7 @@ export const DEFAULT_SETTINGS: Record<SettingKey, string> = {
   currency_symbol: '₱',
   org_name: 'Community Treasury',
   last_backup_at: '',
+  last_backup_marker: '',
   receipt_secret: '',
 };
 
@@ -31,6 +34,7 @@ const SETTING_KEYS: SettingKey[] = [
   'currency_symbol',
   'org_name',
   'last_backup_at',
+  'last_backup_marker',
   'receipt_secret',
 ];
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -59,6 +59,8 @@ import {
   type StoredBackup,
 } from '../services/backupService';
 import { DeviceBackupsModal } from '../components/DeviceBackupsModal';
+import { LoadErrorBanner } from '../components/LoadErrorBanner';
+import { useScopedReload } from '../hooks/use-scoped-reload';
 import { ConfirmReasonModal } from '../components/ConfirmReasonModal';
 import { format } from 'date-fns';
 
@@ -68,7 +70,6 @@ export default function ReportsScreen() {
     setCurrencySymbol,
     organizationName,
     setOrganizationName,
-    refreshKey,
     triggerRefresh,
   } = useAppStore();
 
@@ -91,6 +92,8 @@ export default function ReportsScreen() {
   const [backupBusy, setBackupBusy] = useState(false);
   const [autoBackupCount, setAutoBackupCount] = useState(0);
   const [deviceBackups, setDeviceBackups] = useState<StoredBackup[]>([]);
+  /** Set when a load fails, so the screen can say so instead of showing zeroed figures. */
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [autoBackupNote, setAutoBackupNote] = useState('');
   const [deviceBackupsVisible, setDeviceBackupsVisible] = useState(false);
   const [wipeReasonVisible, setWipeReasonVisible] = useState(false);
@@ -107,32 +110,44 @@ export default function ReportsScreen() {
 
   const loadData = useCallback(async () => {
     try {
-      const [metrics, lastBackup, agingRows, riskRow, forecastRows, deviceBackups] =
-        await Promise.all([
-          ledgerRepo.getMetrics(),
-          settingsRepo.get('last_backup_at'),
-          reportsRepo.getAgingSchedule(),
-          reportsRepo.getPortfolioRisk(),
-          reportsRepo.getForecast(3),
-          // A device that will not list its backup folder must not stop the reports screen from
-          // loading its figures — the backup list is a convenience, the numbers are the job.
-          listAutoBackups().catch(() => [] as StoredBackup[]),
-        ]);
+      const [metrics, lastBackup, agingRows, riskRow, forecastRows] = await Promise.all([
+        ledgerRepo.getMetrics(),
+        settingsRepo.get('last_backup_at'),
+        reportsRepo.getAgingSchedule(),
+        reportsRepo.getPortfolioRisk(),
+        reportsRepo.getForecast(3),
+      ]);
       setMetrics(metrics);
       setLastBackupAt(lastBackup);
       setAging(agingRows);
       setRisk(riskRow);
       setForecast(forecastRows);
-      setAutoBackupCount(deviceBackups.length);
-      setDeviceBackups(deviceBackups);
+      setLoadError(null);
     } catch (err) {
       console.error(err);
+      setLoadError(err instanceof Error ? err.message : 'The database did not respond.');
     }
   }, []);
 
-  useEffect(() => {
-    loadData();
-  }, [loadData, refreshKey]);
+  /**
+   * The device-backup list is read from the filesystem, so it is loaded when the treasurer opens
+   * the list (or after a backup is written) rather than on every refresh of this screen — a
+   * directory listing has no business in the path that renders the month's figures.
+   */
+  const refreshDeviceBackups = useCallback(async () => {
+    const stored = await listAutoBackups().catch(() => [] as StoredBackup[]);
+    setDeviceBackups(stored);
+    setAutoBackupCount(stored.length);
+  }, []);
+
+  const handleOpenDeviceBackups = () => {
+    setDeviceBackupsVisible(true);
+    void refreshDeviceBackups();
+  };
+
+  // This screen shows the book's money (ledger + loans) and the backup date (settings), so those
+  // three scopes reload it — and only while it is the tab on screen.
+  useScopedReload(['ledger', 'loans', 'settings'], loadData);
 
   const handleSaveSettings = async () => {
     const nextOrg = orgInput.trim() || organizationName;
@@ -163,9 +178,7 @@ export default function ReportsScreen() {
       await settingsRepo.set('last_backup_at', summary.generatedAt);
       setLastBackupAt(summary.generatedAt);
       setAutoBackupNote(`Automatic backup written just now (${summary.fileName}).`);
-      const stored = await listAutoBackups().catch(() => [] as StoredBackup[]);
-      setAutoBackupCount(stored.length);
-      setDeviceBackups(stored);
+      await refreshDeviceBackups();
 
       Alert.alert(
         'Automatic Backup Saved',
@@ -228,7 +241,7 @@ export default function ReportsScreen() {
     try {
       setBackupBusy(true);
       const result = await restoreBackup(payload);
-      triggerRefresh();
+      triggerRefresh('all');
 
       const { inserted } = result;
       // Evidence is reported separately, because "the trail on this device was kept, not replaced"
@@ -328,7 +341,7 @@ export default function ReportsScreen() {
 
   const handleConfirmWipe = async (reason: string) => {
     await resetEntireDatabase(reason);
-    triggerRefresh();
+    triggerRefresh('all');
     await loadData();
     Alert.alert(
       'Book Erased',
@@ -423,6 +436,15 @@ Generated from Treasurer Mobile Ledger
           <Text style={styles.headerSubtitle}>Organization overview & data export</Text>
         </View>
 
+        {/* A failed load must be visible, not zeroed figures (see LoadErrorBanner) */}
+        {loadError ? (
+          <LoadErrorBanner
+            what="the report figures"
+            detail={loadError}
+            onRetry={() => void loadData()}
+          />
+        ) : null}
+
         {/* Portfolio Health Card */}
         <View style={styles.healthCard}>
           <View style={styles.healthHeader}>
@@ -469,7 +491,7 @@ Generated from Treasurer Mobile Ledger
         <IntegrityPanel
           orgName={organizationName}
           currencySymbol={currencySymbol}
-          onChanged={triggerRefresh}
+          onChanged={() => triggerRefresh('all')}
         />
 
         {/* Export & Sharing Options */}
@@ -625,7 +647,7 @@ Generated from Treasurer Mobile Ledger
 
           <TouchableOpacity
             style={[styles.actionCard, { marginBottom: 10 }, backupBusy && styles.busyCard]}
-            onPress={() => setDeviceBackupsVisible(true)}
+            onPress={handleOpenDeviceBackups}
             disabled={backupBusy}
             activeOpacity={0.7}
           >
@@ -730,7 +752,7 @@ Generated from Treasurer Mobile Ledger
         backups={deviceBackups}
         onClose={() => setDeviceBackupsVisible(false)}
         onRestored={() => {
-          triggerRefresh();
+          triggerRefresh('all');
           void loadData();
         }}
       />
