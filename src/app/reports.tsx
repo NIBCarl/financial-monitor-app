@@ -34,6 +34,7 @@ import { VerifyReceiptModal } from '../components/VerifyReceiptModal';
 import { PortfolioHealthCard } from '../components/PortfolioHealthCard';
 import { IntegrityPanel } from '../components/IntegrityPanel';
 import { reportsRepo, type AgingRow, type ForecastRow, type PortfolioRisk } from '../db/repositories/reportsRepo';
+import { csvRow } from '../utils/validation';
 import { formatCurrency, formatDbDate } from '../utils/financial';
 import {
   createBackup,
@@ -257,12 +258,28 @@ Generated from Treasurer Mobile Ledger
   const handleExportCSV = async () => {
     try {
       const borrowers = await borrowerRepo.getAll();
-      let csvContent = 'Full Name,Phone,Tag,Active Loans,Outstanding Balance,Has Overdue\n';
+
+      // Every cell goes through csvCell: quoted per RFC 4180, with a leading apostrophe on
+      // anything a spreadsheet would otherwise treat as a formula (a borrower genuinely named
+      // "=SUM(...)" must not execute when the export is opened).
+      const rows: string[] = [
+        csvRow(['Full Name', 'Phone', 'Tag', 'Active Loans', 'Outstanding Balance', 'Has Overdue']),
+      ];
 
       for (const b of borrowers) {
-        csvContent += `"${b.fullName}","${b.phoneNumber}","${b.categoryTag}",${b.activeLoansCount || 0},${b.totalOutstanding || 0},${b.hasOverdue ? 'YES' : 'NO'}\n`;
+        rows.push(
+          csvRow([
+            b.fullName,
+            b.phoneNumber,
+            b.categoryTag,
+            b.activeLoansCount || 0,
+            b.totalOutstanding || 0,
+            b.hasOverdue ? 'YES' : 'NO',
+          ])
+        );
       }
 
+      const csvContent = rows.join('\n') + '\n';
       const fileName = `Borrowers_Report_${format(new Date(), 'yyyyMMdd_HHmm')}.csv`;
       const file = new File(Paths.document, fileName);
       file.write(csvContent);

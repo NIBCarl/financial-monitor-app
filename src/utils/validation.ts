@@ -114,3 +114,30 @@ export function clampText(value: string | undefined | null, max: number = MAX_TE
   if (!trimmed) return undefined;
   return trimmed.length > max ? trimmed.slice(0, max) : trimmed;
 }
+
+/**
+ * Renders one CSV cell safely.
+ *
+ * Two separate problems are handled here, and both are real defect classes rather than theory:
+ *
+ *  1. **Formula injection.** Excel, LibreOffice and Google Sheets treat a cell beginning with
+ *     `=`, `+`, `-`, `@`, tab or CR as a formula. A borrower named `=HYPERLINK(...)` — or a
+ *     description pasted from somewhere else — would then *execute* when the treasurer opens the
+ *     export. Such values get a leading apostrophe, which spreadsheets read as "text starts here".
+ *     Genuine numbers (`-500`) are exempt so negative amounts stay numeric.
+ *  2. **Quoting.** Per RFC 4180 every field is quoted and embedded quotes are doubled, so a name
+ *     containing a comma, quote or newline can no longer break the column structure.
+ */
+export function csvCell(value: unknown): string {
+  const raw = value === null || value === undefined ? '' : String(value);
+  const isPlainNumber = /^-?\d+(\.\d+)?$/.test(raw);
+  const needsFormulaGuard = !isPlainNumber && /^[=+\-@\t\r]/.test(raw);
+  const guarded = needsFormulaGuard ? `'${raw}` : raw;
+  return `"${guarded.replace(/"/g, '""')}"`;
+}
+
+/** Joins one row of CSV cells, each rendered through `csvCell`. */
+export function csvRow(values: unknown[]): string {
+  return values.map(csvCell).join(',');
+}
+

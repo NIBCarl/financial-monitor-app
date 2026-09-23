@@ -7,7 +7,7 @@ const financial = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'fi
 const reminderText = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'reminderText.js'));
 const sealText = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'sealText.js'));
 
-const { parseMoney, parsePositiveMoney, parseTermCount, parseInterestRate, round2, sanitizePhoneForUri } = validation;
+const { parseMoney, parsePositiveMoney, parseTermCount, parseInterestRate, round2, sanitizePhoneForUri, csvCell, csvRow } = validation;
 const {
   calculateAmortization,
   allocatePayment,
@@ -273,6 +273,36 @@ check('any change to a sealed figure changes the payload', () => {
 });
 check('payload carries its own version tag', () =>
   assert.ok(buildSealPayload(sealPayload).startsWith('TREASURER-VAULT-SEAL-v1|')));
+
+console.log('\n[9] CSV export safety (formula injection + RFC 4180 quoting)');
+check('a formula-looking name cannot execute in a spreadsheet', () => {
+  const cell = csvCell('=HYPERLINK("http://evil.example","Pay here")');
+  assert.ok(cell.startsWith('"\'='), `expected an apostrophe guard, got ${cell}`);
+});
+check('other formula sigils are guarded too', () => {
+  ['+1+1', '@SUM(A1)', '\tcmd', '\rcmd'].forEach((raw) => {
+    assert.ok(csvCell(raw).includes(`'${raw}`) || csvCell(raw).replace(/"/g, '').startsWith("'"), raw);
+  });
+});
+check('genuine numbers stay numeric (no spurious apostrophe)', () => {
+  assert.strictEqual(csvCell(-500), '"-500"');
+  assert.strictEqual(csvCell(1234.56), '"1234.56"');
+  assert.strictEqual(csvCell(0), '"0"');
+});
+check('embedded quotes are doubled, not left to break the row', () =>
+  assert.strictEqual(csvCell('Nena "Bebang" Cruz'), '"Nena ""Bebang"" Cruz"'));
+check('commas and newlines stay inside the quoted field', () => {
+  assert.strictEqual(csvCell('Cruz, Nena'), '"Cruz, Nena"');
+  assert.strictEqual(csvCell('line1\nline2'), '"line1\nline2"');
+});
+check('null and undefined become an empty cell rather than "null"', () => {
+  assert.strictEqual(csvCell(null), '""');
+  assert.strictEqual(csvCell(undefined), '""');
+});
+check('a full row keeps its column count even with commas in the name', () => {
+  const row = csvRow(['Cruz, Nena', '0917 123 4567', '=bad', 1, 250.5, 'NO']);
+  assert.strictEqual(row.split('","').length, 6);
+});
 
 console.log(`\n${passed} checks passed${process.exitCode ? ' (WITH FAILURES)' : ' — all good'}\n`);
 
