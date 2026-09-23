@@ -21,6 +21,8 @@ import {
   Download,
   UploadCloud,
   ClipboardCheck,
+  Archive,
+  History,
 } from 'lucide-react-native';
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
@@ -37,14 +39,25 @@ import { reportsRepo, type AgingRow, type ForecastRow, type PortfolioRisk } from
 import { csvRow } from '../utils/validation';
 import { formatCurrency, formatDbDate } from '../utils/financial';
 import {
+  AUTO_BACKUP_KEEP,
+  AUTO_BACKUP_INTERVAL_HOURS,
+  BACKUP_STALE_DAYS,
+  describeBackupAge,
+  isBackupStale,
+} from '../utils/backup';
+import {
+  createAutoBackup,
   createBackup,
   describeBackup,
+  listAutoBackups,
   pickBackupFile,
   readAndValidateBackup,
   restoreBackup,
   shareBackup,
   type BackupPayload,
+  type StoredBackup,
 } from '../services/backupService';
+import { DeviceBackupsModal } from '../components/DeviceBackupsModal';
 import { format } from 'date-fns';
 
 export default function ReportsScreen() {
@@ -74,6 +87,10 @@ export default function ReportsScreen() {
   const [isEditingSettings, setIsEditingSettings] = useState(false);
   const [lastBackupAt, setLastBackupAt] = useState('');
   const [backupBusy, setBackupBusy] = useState(false);
+  const [autoBackupCount, setAutoBackupCount] = useState(0);
+  const [deviceBackups, setDeviceBackups] = useState<StoredBackup[]>([]);
+  const [autoBackupNote, setAutoBackupNote] = useState('');
+  const [deviceBackupsVisible, setDeviceBackupsVisible] = useState(false);
   const [verifyVisible, setVerifyVisible] = useState(false);
   const [aging, setAging] = useState<AgingRow[]>([]);
   const [risk, setRisk] = useState<PortfolioRisk>({
@@ -87,18 +104,22 @@ export default function ReportsScreen() {
 
   const loadData = useCallback(async () => {
     try {
-      const [metrics, lastBackup, agingRows, riskRow, forecastRows] = await Promise.all([
-        ledgerRepo.getMetrics(),
-        settingsRepo.get('last_backup_at'),
-        reportsRepo.getAgingSchedule(),
-        reportsRepo.getPortfolioRisk(),
-        reportsRepo.getForecast(3),
-      ]);
+      const [metrics, lastBackup, agingRows, riskRow, forecastRows, deviceBackups] =
+        await Promise.all([
+          ledgerRepo.getMetrics(),
+          settingsRepo.get('last_backup_at'),
+          reportsRepo.getAgingSchedule(),
+          reportsRepo.getPortfolioRisk(),
+          reportsRepo.getForecast(3),
+          listAutoBackups(),
+        ]);
       setMetrics(metrics);
       setLastBackupAt(lastBackup);
       setAging(agingRows);
       setRisk(riskRow);
       setForecast(forecastRows);
+      setAutoBackupCount(deviceBackups.length);
+      setDeviceBackups(deviceBackups);
     } catch (err) {
       console.error(err);
     }
@@ -122,6 +143,50 @@ export default function ReportsScreen() {
       Alert.alert('Settings Saved', 'Organization name and currency symbol are stored on this device.');
     } catch (err) {
       Alert.alert('Error', err instanceof Error ? err.message : 'Failed to save settings.');
+    }
+  };
+
+  /**
+   * Back Up Now: writes a fresh rotating backup and, because the treasurer is standing here, offers
+   * to push it off-device as well. The on-device copy is what protects against a lost phone only if
+   * the phone itself survives, so sharing stays one tap away.
+   */
+  const handleAutoBackupNow = async () => {
+    try {
+      setBackupBusy(true);
+      const summary = await createAutoBackup();
+      await settingsRepo.set('last_backup_at', summary.generatedAt);
+      setLastBackupAt(summary.generatedAt);
+      setAutoBackupNote(`Automatic backup written just now (${summary.fileName}).`);
+      const stored = await listAutoBackups();
+      setAutoBackupCount(stored.length);
+      setDeviceBackups(stored);
+
+      Alert.alert(
+        'Automatic Backup Saved',
+        `Kept on this device as ${summary.fileName}. The ${AUTO_BACKUP_KEEP} newest automatic copies are kept, older ones are deleted.`,
+        [
+          { text: 'Done', style: 'cancel' },
+          {
+            text: 'Also Share',
+            onPress: () => {
+              void shareBackup(summary).catch((err) =>
+                Alert.alert(
+                  'Share Failed',
+                  err instanceof Error ? err.message : 'Could not share the backup.'
+                )
+              );
+            },
+          },
+        ]
+      );
+    } catch (err) {
+      Alert.alert(
+        'Backup Failed',
+        err instanceof Error ? err.message : 'Could not create the backup.'
+      );
+    } finally {
+      setBackupBusy(false);
     }
   };
 
@@ -464,6 +529,75 @@ Generated from Treasurer Mobile Ledger
             </View>
           </View>
 
+          {isBackupStale(lastBackupAt) ? (
+            <View style={styles.backupWarning}>
+              <ShieldCheck size={15} color="#b45309" />
+              <Text style={styles.backupWarningText}>
+                No backup in {BACKUP_STALE_DAYS} days. Losing this phone would lose the book — back
+                it up and share the file off-device.
+              </Text>
+            </View>
+          ) : null}
+
+          <View style={styles.settingsRow}>
+            <View style={styles.settingsIcon}>
+              <Archive size={18} color="#0c4a6e" />
+            </View>
+            <View style={styles.settingsInputGroup}>
+              <Text style={styles.settingsLabel}>Automatic Backups</Text>
+              <Text style={styles.settingsValue}>
+                {describeBackupAge(lastBackupAt)} • {autoBackupCount} of {AUTO_BACKUP_KEEP} on this
+                phone
+              </Text>
+              <Text style={styles.backupPolicyNote}>
+                The app writes one by itself when it is opened on a new day (at most once every{' '}
+                {AUTO_BACKUP_INTERVAL_HOURS} hours) and keeps the newest {AUTO_BACKUP_KEEP}.
+                {autoBackupNote ? ` ${autoBackupNote}` : ''}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.divider} />
+
+          <TouchableOpacity
+            style={[styles.actionCard, { marginBottom: 10 }, backupBusy && styles.busyCard]}
+            onPress={handleAutoBackupNow}
+            disabled={backupBusy}
+            activeOpacity={0.7}
+          >
+            <View style={[styles.actionIconBg, { backgroundColor: '#dcfce7' }]}>
+              <Archive size={20} color="#047857" />
+            </View>
+            <View style={styles.actionCardInfo}>
+              <Text style={styles.actionCardTitle}>
+                {backupBusy ? 'Working…' : 'Back Up Now'}
+              </Text>
+              <Text style={styles.actionCardDesc}>
+                Write a rotating copy on this device right away, and share it if you want it
+                off-device too.
+              </Text>
+            </View>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.actionCard, { marginBottom: 10 }, backupBusy && styles.busyCard]}
+            onPress={() => setDeviceBackupsVisible(true)}
+            disabled={backupBusy}
+            activeOpacity={0.7}
+          >
+            <View style={[styles.actionIconBg, { backgroundColor: '#e0f2fe' }]}>
+              <History size={20} color="#0c4a6e" />
+            </View>
+            <View style={styles.actionCardInfo}>
+              <Text style={styles.actionCardTitle}>Restore a Device Backup</Text>
+              <Text style={styles.actionCardDesc}>
+                {autoBackupCount > 0
+                  ? `Pick one of the ${autoBackupCount} copies this phone kept and restore it.`
+                  : 'The copies this phone keeps appear here after the first automatic backup.'}
+              </Text>
+            </View>
+          </TouchableOpacity>
+
           <View style={styles.divider} />
 
           <TouchableOpacity
@@ -545,6 +679,16 @@ Generated from Treasurer Mobile Ledger
         visible={verifyVisible}
         onClose={() => setVerifyVisible(false)}
         currencySymbol={currencySymbol}
+      />
+
+      <DeviceBackupsModal
+        visible={deviceBackupsVisible}
+        backups={deviceBackups}
+        onClose={() => setDeviceBackupsVisible(false)}
+        onRestored={() => {
+          triggerRefresh();
+          void loadData();
+        }}
       />
     </SafeAreaView>
   );
@@ -731,6 +875,30 @@ const styles = StyleSheet.create({
     height: 1,
     backgroundColor: '#f1f5f9',
     marginVertical: 12,
+  },
+  backupWarning: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    marginTop: 12,
+    padding: 10,
+    borderRadius: 10,
+    backgroundColor: '#fffbeb',
+    borderWidth: 1,
+    borderColor: '#fde68a',
+  },
+  backupWarningText: {
+    flex: 1,
+    fontSize: 11,
+    lineHeight: 16,
+    color: '#92400e',
+    fontWeight: '600',
+  },
+  backupPolicyNote: {
+    fontSize: 10,
+    lineHeight: 14,
+    color: '#64748b',
+    marginTop: 4,
   },
   editSettingsBtn: {
     minHeight: 48,

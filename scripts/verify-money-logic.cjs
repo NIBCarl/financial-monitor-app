@@ -10,6 +10,7 @@ const money = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'money.
 const penalties = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'penalties.js'));
 const qr = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'qr.js'));
 const signature = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'signature.js'));
+const backupPolicy = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'backup.js'));
 
 const { parseMoney, parsePositiveMoney, parseTermCount, parseInterestRate, round2, sanitizePhoneForUri, csvCell, csvRow, MAX_MONEY } = validation;
 const {
@@ -44,6 +45,19 @@ const {
   signatureToSvgDocument,
   parseStoredStrokes,
 } = signature;
+const {
+  AUTO_BACKUP_KEEP,
+  AUTO_BACKUP_PREFIX,
+  backupAgeDays,
+  isAutoBackupDue,
+  isBackupStale,
+  describeBackupAge,
+  autoBackupFileName,
+  isAutoBackupFileName,
+  selectAutoBackupsToDelete,
+  checksumOf,
+  serialiseBackupTables,
+} = backupPolicy;
 
 let passed = 0;
 const check = (label, fn) => {
@@ -637,6 +651,146 @@ check('a stored signature round-trips through JSON unchanged', () => {
     ],
   ];
   assert.deepStrictEqual(parseStoredStrokes(JSON.stringify(strokes)), strokes);
+});
+
+/* --------------------------------------------------------- backup policy (report §20.9) */
+
+const NOW = new Date('2026-09-23T12:00:00.000Z');
+
+check('a book that has never been backed up is treated as overdue', () => {
+  assert.strictEqual(backupAgeDays(null, NOW), null);
+  assert.strictEqual(backupAgeDays('', NOW), null);
+  assert.strictEqual(isAutoBackupDue(null, NOW), true);
+  assert.strictEqual(isBackupStale(null, NOW), true);
+  assert.strictEqual(describeBackupAge(null, NOW), 'Never backed up');
+});
+
+check('backup age is counted in whole days from the stored timestamp', () => {
+  assert.strictEqual(backupAgeDays('2026-09-23T09:00:00.000Z', NOW), 0);
+  assert.strictEqual(backupAgeDays('2026-09-22T09:00:00.000Z', NOW), 1);
+  assert.strictEqual(backupAgeDays('2026-09-20T12:00:00.000Z', NOW), 3);
+  // SQLite writes "YYYY-MM-DD HH:MM:SS" in UTC; that must not be read as local time.
+  assert.strictEqual(backupAgeDays('2026-09-20 12:00:00', NOW), 3);
+});
+
+check('a clock that moved backwards must not stop backups for good', () => {
+  const future = '2026-10-01T12:00:00.000Z';
+  assert.strictEqual(isAutoBackupDue(future, NOW), true);
+  assert.strictEqual(backupAgeDays(future, NOW), 0);
+});
+
+check('the automatic backup cadence is respected, then released', () => {
+  assert.strictEqual(isAutoBackupDue('2026-09-23T05:00:00.000Z', NOW), false);
+  assert.strictEqual(isAutoBackupDue('2026-09-22T17:00:00.000Z', NOW), false);
+  assert.strictEqual(isAutoBackupDue('2026-09-22T16:00:00.000Z', NOW), true);
+});
+
+check('the treasurer is warned on the seventh day without a backup', () => {
+  assert.strictEqual(isBackupStale('2026-09-17T12:00:00.000Z', NOW), false);
+  assert.strictEqual(isBackupStale('2026-09-16T12:00:00.000Z', NOW), true);
+  assert.strictEqual(describeBackupAge('2026-09-23T09:00:00.000Z', NOW), 'Backed up today');
+  assert.strictEqual(describeBackupAge('2026-09-22T09:00:00.000Z', NOW), 'Backed up yesterday');
+  assert.strictEqual(describeBackupAge('2026-09-21T09:00:00.000Z', NOW), 'Backed up 2 days ago');
+});
+
+check('automatic backup names sort by age and are recognisable', () => {
+  const earlier = autoBackupFileName('2026-09-22T08:05:00.000Z');
+  const later = autoBackupFileName('2026-09-23T08:05:00.000Z');
+  assert.strictEqual(earlier, 'treasurer-vault-auto-20260922-0805.json');
+  assert.ok(later > earlier);
+  assert.ok(isAutoBackupFileName(later));
+  // A manual export must never be rotated away by the automatic policy.
+  assert.strictEqual(isAutoBackupFileName('treasurer-vault-backup-20260922-0805.json'), false);
+});
+
+check('rotation keeps the newest copies and deletes the rest, oldest first', () => {
+  const names = [
+    'treasurer-vault-auto-20260918-0800.json',
+    'treasurer-vault-auto-20260919-0800.json',
+    'treasurer-vault-auto-20260920-0800.json',
+    'treasurer-vault-auto-20260921-0800.json',
+    'treasurer-vault-auto-20260922-0800.json',
+    'treasurer-vault-auto-20260923-0800.json',
+    'notes.txt',
+    'treasurer-vault-backup-20260101-0000.json',
+  ];
+  assert.deepStrictEqual(selectAutoBackupsToDelete(names, 5), [
+    'treasurer-vault-auto-20260918-0800.json',
+  ]);
+});
+
+check('rotation deletes nothing while there is room, and never touches foreign files', () => {
+  const two = ['treasurer-vault-auto-20260922-0800.json', 'treasurer-vault-auto-20260923-0800.json'];
+  assert.deepStrictEqual(selectAutoBackupsToDelete(two, AUTO_BACKUP_KEEP), []);
+  assert.deepStrictEqual(selectAutoBackupsToDelete(['notes.txt'], 0), []);
+  assert.deepStrictEqual(selectAutoBackupsToDelete([], 5), []);
+  assert.strictEqual(AUTO_BACKUP_PREFIX, 'treasurer-vault-auto-');
+});
+
+// A backup written before v1.0.5: the same tables, in the same order, and no signatures/penalties.
+const LEGACY_TABLES = [
+  'borrowers',
+  'loans',
+  'loan_schedules',
+  'loan_payments',
+  'ledger_transactions',
+  'app_settings',
+];
+const ALL_TABLES = [...LEGACY_TABLES, 'audit_log', 'ledger_seals', 'penalty_rules', 'penalty_charges', 'signatures'];
+
+const legacyData = {
+  borrowers: [{ id: 'b1', full_name: 'Juan Dela Cruz' }],
+  loans: [{ id: 'l1', principal_amount: 5000 }],
+  loan_schedules: [],
+  loan_payments: [{ id: 'p1', amount_paid: 1250 }],
+  ledger_transactions: [{ id: 't1', amount: 1250 }],
+  app_settings: [{ key: 'currency_symbol', value: 'PHP' }],
+};
+
+check('an older backup still verifies against the tables it was written from', () => {
+  // This is the shape a v1.0.4 backup has, and the checksum it carries was made from those 6 tables.
+  const checksumInFile = checksumOf(serialiseBackupTables(legacyData, LEGACY_TABLES));
+
+  // Restoring re-computes it from the file's own table list, so it must match...
+  assert.strictEqual(checksumOf(serialiseBackupTables(legacyData, LEGACY_TABLES)), checksumInFile);
+
+  // ...while the same data serialised over every table of a newer app is a different string, which
+  // is exactly why verification cannot use the current table list blindly.
+  assert.notStrictEqual(checksumOf(serialiseBackupTables(legacyData, ALL_TABLES)), checksumInFile);
+});
+
+check('a backup from the current version verifies over the full table set', () => {
+  const fullData = { ...legacyData, signatures: [{ id: 's1', entity: 'LOAN', entity_id: 'l1' }] };
+  const checksum = checksumOf(serialiseBackupTables(fullData, ALL_TABLES));
+
+  assert.strictEqual(checksumOf(serialiseBackupTables(fullData, ALL_TABLES)), checksum);
+  assert.match(checksum, /^[0-9a-f]{8}$/);
+});
+
+check('the checksum catches an edited amount, a deleted row and a reordered table set', () => {
+  const checksum = checksumOf(serialiseBackupTables(legacyData, LEGACY_TABLES));
+
+  const edited = {
+    ...legacyData,
+    loan_payments: [{ id: 'p1', amount_paid: 1251 }],
+  };
+  const deleted = { ...legacyData, loan_payments: [] };
+  const reordered = serialiseBackupTables(legacyData, [...LEGACY_TABLES].reverse());
+
+  assert.notStrictEqual(checksumOf(serialiseBackupTables(edited, LEGACY_TABLES)), checksum);
+  assert.notStrictEqual(checksumOf(serialiseBackupTables(deleted, LEGACY_TABLES)), checksum);
+  assert.notStrictEqual(checksumOf(reordered), checksum);
+});
+
+check('a missing table serialises as empty, so an absent section cannot change a checksum silently', () => {
+  const withEmpty = { ...legacyData, loan_schedules: [] };
+  const missing = { ...legacyData };
+  delete missing.loan_schedules;
+
+  assert.strictEqual(
+    serialiseBackupTables(missing, LEGACY_TABLES),
+    serialiseBackupTables(withEmpty, LEGACY_TABLES)
+  );
 });
 
 console.log(`\n${passed} checks passed${process.exitCode ? ' (WITH FAILURES)' : ' — all good'}\n`);

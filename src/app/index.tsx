@@ -58,6 +58,7 @@ import {
   getScheduleRemaining,
 } from '../utils/financial';
 import { getPaymentMethodLabel } from '../utils/labels';
+import { runAutoBackupIfDue } from '../services/backupService';
 import { sharePaymentReminder } from '../services/receiptService';
 
 export default function DashboardScreen() {
@@ -106,6 +107,10 @@ export default function DashboardScreen() {
   // Installments due within the week (or already late) — drives the reminders card.
   const [dueItems, setDueItems] = useState<DueItem[]>([]);
 
+  // Backup health, shown as a nag when the book has gone too long without a copy.
+  const [backupAgeLabel, setBackupAgeLabel] = useState('');
+  const [backupStale, setBackupStale] = useState(false);
+
   const loadDashboardData = useCallback(async () => {
     try {
       const [m, scheds, recentCollections, dueItems] = await Promise.all([
@@ -126,6 +131,35 @@ export default function DashboardScreen() {
   useEffect(() => {
     loadDashboardData();
   }, [loadDashboardData, refreshKey]);
+
+  /**
+   * The app backs itself up (report §20.9).
+   *
+   * Opening the app is the moment the schedule is checked: a phone that is used daily therefore
+   * never falls more than a day behind, and the treasurer is told when the book has gone a week
+   * without a copy. Failure here is deliberately silent in the UI — a missing automatic backup must
+   * never block the work in front of the treasurer.
+   */
+  useEffect(() => {
+    let active = true;
+
+    const checkBackup = async () => {
+      try {
+        const outcome = await runAutoBackupIfDue();
+        if (!active) return;
+        setBackupAgeLabel(outcome.ageLabel);
+        setBackupStale(outcome.stale);
+      } catch (err) {
+        console.warn('Automatic backup skipped:', err);
+        if (active) setBackupStale(false);
+      }
+    };
+
+    void checkBackup();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -205,6 +239,21 @@ export default function DashboardScreen() {
             </Text>
           </View>
         </View>
+
+        {/* Backup nag: the book has gone long enough without a copy to say so (report §20.9) */}
+        {backupStale ? (
+          <View style={styles.backupNag}>
+            <AlertTriangle size={15} color="#b45309" />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.backupNagTitle}>
+                {backupAgeLabel || 'No backup on this device yet'}
+              </Text>
+              <Text style={styles.backupNagText}>
+                Reports → Backup &amp; Restore keeps a copy that survives a lost or broken phone.
+              </Text>
+            </View>
+          </View>
+        ) : null}
 
         {/* Top 4 Metrics Grid */}
         <View style={styles.metricsGrid}>
@@ -572,6 +621,28 @@ const styles = StyleSheet.create({
   metricsGrid: {
     gap: 10,
     marginBottom: 16,
+  },
+  backupNag: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    padding: 10,
+    marginBottom: 14,
+    borderRadius: 12,
+    backgroundColor: '#fffbeb',
+    borderWidth: 1,
+    borderColor: '#fde68a',
+  },
+  backupNagTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#92400e',
+  },
+  backupNagText: {
+    fontSize: 11,
+    lineHeight: 15,
+    color: '#a16207',
+    marginTop: 2,
   },
   metricsRow: {
     flexDirection: 'row',
