@@ -6,8 +6,9 @@ const validation = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'v
 const financial = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'financial.js'));
 const reminderText = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'reminderText.js'));
 const sealText = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'sealText.js'));
+const money = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'money.js'));
 
-const { parseMoney, parsePositiveMoney, parseTermCount, parseInterestRate, round2, sanitizePhoneForUri, csvCell, csvRow } = validation;
+const { parseMoney, parsePositiveMoney, parseTermCount, parseInterestRate, round2, sanitizePhoneForUri, csvCell, csvRow, MAX_MONEY } = validation;
 const {
   calculateAmortization,
   allocatePayment,
@@ -23,6 +24,15 @@ const {
 } = financial;
 const { normalisePhone, buildReminderMessage, buildBulkReminderMessage } = reminderText;
 const { buildSealPayload } = sealText;
+const {
+  toCents,
+  fromCents,
+  sumPesosToCents,
+  percentOfCents,
+  splitCents,
+  canonicalMoney,
+  roundHalfAwayFromZero,
+} = money;
 
 let passed = 0;
 const check = (label, fn) => {
@@ -302,6 +312,60 @@ check('null and undefined become an empty cell rather than "null"', () => {
 check('a full row keeps its column count even with commas in the name', () => {
   const row = csvRow(['Cruz, Nena', '0917 123 4567', '=bad', 1, 250.5, 'NO']);
   assert.strictEqual(row.split('","').length, 6);
+});
+
+console.log('\n[10] Money layer (integer centavos — the drift guarantee)');
+check('pesos <-> centavos round-trips exactly', () => {
+  assert.strictEqual(toCents(10.01), 1001);
+  assert.strictEqual(fromCents(1001), 10.01);
+  assert.strictEqual(toCents(2625), 262500);
+  assert.strictEqual(fromCents(262500), 2625);
+});
+check('rounding is half-away-from-zero, not Math.round', () => {
+  assert.strictEqual(roundHalfAwayFromZero(2.5), 3);
+  assert.strictEqual(roundHalfAwayFromZero(-2.5), -3); // Math.round(-2.5) === -2, which loses a centavo
+  assert.strictEqual(toCents(0.005), 1);
+  assert.strictEqual(fromCents(1), 0.01);
+});
+check('the classic float drift cannot survive canonicalMoney', () => {
+  assert.notStrictEqual(0.1 + 0.2, 0.3); // the raw float really is 0.30000000000000004
+  assert.strictEqual(canonicalMoney(0.1 + 0.2), 0.3);
+  assert.strictEqual(canonicalMoney(0.01 * 1000), 10);
+});
+check('summing a thousand centavo amounts stays exact', () => {
+  const amounts = Array.from({ length: 1000 }, (_, i) => i + 0.01);
+  // 0.01 added a thousand times is 10.000000000000002 as a raw float; the money layer returns 10.
+  assert.strictEqual(fromCents(sumPesosToCents(amounts)), 499510);
+  assert.strictEqual(sumPesosToCents(Array.from({ length: 1000 }, () => 0.01)), toCents(10));
+});
+check('canonicalMoney is idempotent', () => {
+  const once = canonicalMoney(10500.005);
+  assert.strictEqual(canonicalMoney(once), once);
+});
+check('the maximum allowed amount still round-trips', () =>
+  assert.strictEqual(fromCents(toCents(MAX_MONEY)), 999999999.99));
+check('percentOfCents is exact (5% of PHP 105.00)', () =>
+  assert.strictEqual(percentOfCents(10500, 5), 525));
+check('percentOfCents rounds half away from zero', () =>
+  assert.strictEqual(percentOfCents(1005, 2.5), 25)); // 25.125 -> 25
+check('splitCents always sums to the total, remainder on the last part', () => {
+  assert.deepStrictEqual(splitCents(10500, 4), [2625, 2625, 2625, 2625]);
+  assert.deepStrictEqual(splitCents(10000, 3), [3333, 3333, 3334]);
+  assert.strictEqual(splitCents(10000, 3).reduce((a, b) => a + b, 0), 10000);
+  assert.strictEqual(splitCents(1, 3).reduce((a, b) => a + b, 0), 1);
+});
+check('no money is created or destroyed by a schedule', () => {
+  const result = calculateAmortization({
+    principal: 9999.99,
+    interestRate: 3.75,
+    interestType: 'FLAT',
+    frequency: 'MONTHLY',
+    termCount: 7,
+    startDate: '2026-01-31',
+  });
+  const scheduleCents = sumPesosToCents(result.installments.map((i) => i.expectedAmount));
+  assert.strictEqual(scheduleCents, toCents(result.totalPayable));
+  assert.strictEqual(result.installments.length, 7);
 });
 
 console.log(`\n${passed} checks passed${process.exitCode ? ' (WITH FAILURES)' : ' — all good'}\n`);

@@ -2,7 +2,7 @@ import { Share } from 'react-native';
 import * as Crypto from 'expo-crypto';
 import { LoanPayment, ReceiptData } from '../db/types';
 import { formatCurrency, formatDatePretty, formatDbDateTime } from '../utils/financial';
-import { round2 } from '../utils/validation';
+import { canonicalMoney } from '../utils/money';
 import { settingsRepo } from '../db/repositories/settingsRepo';
 
 /**
@@ -42,9 +42,9 @@ export function buildVerificationMessage(fields: ReceiptVerificationFields, secr
   return [
     VERIFICATION_TOKEN_PREFIX,
     fields.paymentId,
-    round2(fields.amountPaid).toFixed(2),
+    canonicalMoney(fields.amountPaid).toFixed(2),
     fields.paidAt,
-    round2(fields.remainingBalance).toFixed(2),
+    canonicalMoney(fields.remainingBalance).toFixed(2),
     secret,
   ].join('|');
 }
@@ -54,9 +54,9 @@ export function buildVerificationToken(fields: ReceiptVerificationFields, code: 
   return [
     VERIFICATION_TOKEN_PREFIX,
     fields.paymentId,
-    round2(fields.amountPaid).toFixed(2),
+    canonicalMoney(fields.amountPaid).toFixed(2),
     fields.paidAt,
-    round2(fields.remainingBalance).toFixed(2),
+    canonicalMoney(fields.remainingBalance).toFixed(2),
     code.replace('-', ''),
   ].join('~');
 }
@@ -150,7 +150,7 @@ export async function verifyReceiptText(
 }
 
 export function isReceiptSettled(receipt: ReceiptData): boolean {
-  return round2(receipt.remainingBalance) <= MONEY_EPSILON;
+  return canonicalMoney(receipt.remainingBalance) <= MONEY_EPSILON;
 }
 
 export interface PaymentRecordedInput {

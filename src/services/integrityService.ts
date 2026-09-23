@@ -6,7 +6,7 @@ import { ledgerRepo } from '../db/repositories/ledgerRepo';
 import { sealRepo, type LedgerSeal } from '../db/repositories/sealRepo';
 import { settingsRepo } from '../db/repositories/settingsRepo';
 import { buildSealPayload, formatSealText, type SealPayload } from '../utils/sealText';
-import { round2 } from '../utils/validation';
+import { canonicalMoney } from '../utils/money';
 
 export { buildSealPayload, formatSealText };
 export type { SealPayload, SealLike } from '../utils/sealText';
@@ -83,8 +83,8 @@ export async function runBooksCheck(): Promise<BooksCheckResult> {
   `);
 
   for (const loan of loanRows) {
-    const expected = round2(Math.max(0, loan.totalPayable - loan.paidSum));
-    const stored = round2(loan.remainingBalance);
+    const expected = canonicalMoney(Math.max(0, loan.totalPayable - loan.paidSum));
+    const stored = canonicalMoney(loan.remainingBalance);
     if (Math.abs(expected - stored) > 0.009) {
       issues.push({
         kind: 'BALANCE',
@@ -145,9 +145,9 @@ export async function runBooksCheck(): Promise<BooksCheckResult> {
   const paymentTotalRow = await db.getFirstAsync<{ total: number }>(
     `SELECT COALESCE(SUM(amount_paid), 0) as total FROM loan_payments WHERE voided_at IS NULL`
   );
-  const paymentTotal = round2(Number(paymentTotalRow?.total ?? 0));
+  const paymentTotal = canonicalMoney(Number(paymentTotalRow?.total ?? 0));
 
-  const ledgerRepayments = round2(
+  const ledgerRepayments = canonicalMoney(
     ledgerRows
       .filter((r) => r.category === 'LOAN_REPAYMENT')
       .reduce((sum, r) => sum + Number(r.amount), 0)

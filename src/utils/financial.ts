@@ -1,6 +1,13 @@
 import { addDays, addWeeks, addMonths, format, parseISO, isBefore, startOfDay, differenceInCalendarDays } from 'date-fns';
 import { InterestType, LoanSchedule, RepaymentFrequency, ScheduleStatus } from '../db/types';
-import { round2 } from './validation';
+import {
+  fromCents,
+  percentOfCents,
+  roundHalfAwayFromZero,
+  splitCents,
+  storedToCents,
+  toCents,
+} from './money';
 
 export interface CalculatedInstallment {
   installmentNumber: number;
@@ -32,26 +39,26 @@ export function calculateAmortization(params: {
   // A lump-sum loan is settled by a single payment, regardless of the requested term count.
   const effectiveTermCount = frequency === 'LUMP_SUM' ? 1 : Math.max(1, Math.trunc(termCount));
 
-  let interestAmount = 0;
+  // Everything below runs on whole centavos so the schedule sums exactly to the total payable.
+  const principalCents = toCents(principal);
+  let interestCents = 0;
+
   if (interestType === 'FLAT') {
-    interestAmount = round2((principal * interestRate) / 100);
+    interestCents = percentOfCents(principalCents, interestRate);
   } else if (interestType === 'MONTHLY_SIMPLE') {
-    // Approx month multiplier based on frequency
+    // Interest accrues per month; the term is expressed in months for the chosen frequency.
     let months = 1;
     if (frequency === 'WEEKLY') months = effectiveTermCount / 4;
     else if (frequency === 'BI_WEEKLY') months = effectiveTermCount / 2;
     else if (frequency === 'MONTHLY') months = effectiveTermCount;
     else if (frequency === 'DAILY') months = effectiveTermCount / 30;
-    interestAmount = round2(principal * (interestRate / 100) * Math.max(1, months));
-  } else {
-    interestAmount = 0;
+    interestCents = roundHalfAwayFromZero(principalCents * (interestRate / 100) * Math.max(1, months));
   }
 
-  const totalPayable = round2(principal + interestAmount);
-  const baseInstallment = round2(totalPayable / effectiveTermCount);
+  const totalPayableCents = principalCents + interestCents;
+  const installmentAmounts = splitCents(totalPayableCents, effectiveTermCount);
 
   const installments: CalculatedInstallment[] = [];
-  let accumulated = 0;
 
   for (let i = 1; i <= effectiveTermCount; i++) {
     let dueDate: Date;
@@ -75,26 +82,18 @@ export function calculateAmortization(params: {
         break;
     }
 
-    // On the final installment, balance any penny rounding discrepancies
-    let amount = baseInstallment;
-    if (i === effectiveTermCount) {
-      amount = round2(totalPayable - accumulated);
-    } else {
-      accumulated = round2(accumulated + baseInstallment);
-    }
-
     installments.push({
       installmentNumber: i,
       dueDate: format(dueDate, 'yyyy-MM-dd'),
-      expectedAmount: amount,
+      expectedAmount: fromCents(installmentAmounts[i - 1]),
     });
   }
 
   return {
     principal,
-    interestAmount,
-    totalPayable,
-    installmentAmount: baseInstallment,
+    interestAmount: fromCents(interestCents),
+    totalPayable: fromCents(totalPayableCents),
+    installmentAmount: fromCents(installmentAmounts[0] ?? 0),
     termCount: effectiveTermCount,
     installments,
   };
@@ -208,7 +207,16 @@ export function daysBetweenDates(dueDate: string, today: string): number {
 
 /** Outstanding amount of a single installment (never negative). */
 export function getScheduleRemaining(schedule: Pick<LoanSchedule, 'expectedAmount' | 'paidAmount'>): number {
-  return Math.max(0, round2(schedule.expectedAmount - schedule.paidAmount));
+  const expectedCents = toCents(schedule.expectedAmount);
+  const paidCents = toCents(schedule.paidAmount);
+  return fromCents(Math.max(0, expectedCents - paidCents));
+}
+
+/** Outstanding amount of a single installment, in centavos (used by the money paths). */
+export function getScheduleRemainingCents(
+  schedule: Pick<LoanSchedule, 'expectedAmount' | 'paidAmount'>
+): number {
+  return Math.max(0, toCents(schedule.expectedAmount) - toCents(schedule.paidAmount));
 }
 
 /** Next installment the borrower still owes, in schedule order (null when settled). */
@@ -242,33 +250,33 @@ export interface AllocationResult {
  */
 export function allocatePayment(schedules: LoanSchedule[], amount: number): AllocationResult {
   const allocations: PaymentAllocation[] = [];
-  let remaining = round2(amount);
+  let remainingCents = toCents(amount);
 
   const ordered = [...schedules].sort((a, b) => a.installmentNumber - b.installmentNumber);
 
   for (const schedule of ordered) {
-    if (remaining <= 0) break;
+    if (remainingCents <= 0) break;
     if (schedule.status === 'PAID') continue;
 
-    const due = getScheduleRemaining(schedule);
-    if (due <= 0) continue;
+    const dueCents = getScheduleRemainingCents(schedule);
+    if (dueCents <= 0) continue;
 
-    const appliedAmount = round2(Math.min(due, remaining));
-    const newPaidAmount = round2(schedule.paidAmount + appliedAmount);
-    const newStatus: ScheduleStatus = newPaidAmount >= round2(schedule.expectedAmount) - 0.004 ? 'PAID' : 'PARTIAL';
+    const appliedCents = Math.min(dueCents, remainingCents);
+    const newPaidCents = toCents(schedule.paidAmount) + appliedCents;
+    const newStatus: ScheduleStatus = newPaidCents >= toCents(schedule.expectedAmount) ? 'PAID' : 'PARTIAL';
 
     allocations.push({
       scheduleId: schedule.id,
       installmentNumber: schedule.installmentNumber,
-      appliedAmount,
-      newPaidAmount,
+      appliedAmount: fromCents(appliedCents),
+      newPaidAmount: fromCents(newPaidCents),
       newStatus,
     });
 
-    remaining = round2(remaining - appliedAmount);
+    remainingCents -= appliedCents;
   }
 
-  return { allocations, unallocated: remaining > 0 ? remaining : 0 };
+  return { allocations, unallocated: remainingCents > 0 ? fromCents(remainingCents) : 0 };
 }
 
 /**
@@ -340,8 +348,8 @@ export function rebuildScheduleStates(
     a.paidAt === b.paidAt ? a.id.localeCompare(b.id) : a.paidAt < b.paidAt ? -1 : 1
   );
 
-  let totalApplied = 0;
-  let unallocated = 0;
+  let totalAppliedCents = 0;
+  let unallocatedCents = 0;
 
   for (const payment of ordered) {
     const before = new Map(working.map((s) => [s.id, s.status]));
@@ -356,8 +364,8 @@ export function rebuildScheduleStates(
       }
     }
 
-    totalApplied = round2(totalApplied + round2(payment.amountPaid - leftover));
-    unallocated = round2(unallocated + leftover);
+    totalAppliedCents += toCents(payment.amountPaid) - toCents(leftover);
+    unallocatedCents += toCents(leftover);
   }
 
   return {
@@ -367,7 +375,7 @@ export function rebuildScheduleStates(
       status: schedule.status,
       settledDate: settledDates.get(schedule.id) ?? null,
     })),
-    totalApplied,
-    unallocated,
+    totalApplied: fromCents(totalAppliedCents),
+    unallocated: fromCents(unallocatedCents),
   };
 }

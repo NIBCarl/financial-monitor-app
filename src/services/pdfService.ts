@@ -6,7 +6,7 @@ import { borrowerRepo } from '../db/repositories/borrowerRepo';
 import { loanRepo } from '../db/repositories/loanRepo';
 import { paymentRepo } from '../db/repositories/paymentRepo';
 import { formatCurrency, formatDbDate, getDaysLate, getScheduleRemaining } from '../utils/financial';
-import { round2 } from '../utils/validation';
+import { canonicalMoney } from '../utils/money';
 
 /**
  * PDF documents.
@@ -134,7 +134,7 @@ export async function exportMonthlyReportPdf(input: MonthlyReportInput): Promise
   const money = (v: number) => formatCurrency(v, symbol);
 
   const arrears = aging.filter((a) => a.bucket !== 'CURRENT' && a.bucket !== 'DUE_SOON');
-  const arrearsTotal = round2(arrears.reduce((sum, a) => sum + a.amount, 0));
+  const arrearsTotal = canonicalMoney(arrears.reduce((sum, a) => sum + a.amount, 0));
 
   const agingRows = aging
     .map(
@@ -312,7 +312,9 @@ export async function exportLoanStatementPdf(input: StatementInput): Promise<voi
         .join('')
     : '<tr><td colspan="5">No payments recorded yet.</td></tr>';
 
-  const paidTotal = round2(payments.filter((p) => !p.voidedAt).reduce((s, p) => s + p.amountPaid, 0));
+  const paidTotal = canonicalMoney(
+    payments.filter((p) => !p.voidedAt).reduce((s, p) => s + p.amountPaid, 0)
+  );
 
   const body = `
     <h2>Borrower</h2>

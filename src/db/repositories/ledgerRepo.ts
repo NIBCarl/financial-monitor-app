@@ -9,7 +9,7 @@ import {
   LoanPayment,
   LoanSchedule,
 } from '../types';
-import { round2 } from '../../utils/validation';
+import { canonicalMoney } from '../../utils/money';
 import { auditRepo } from './auditRepo';
 
 export const ledgerRepo = {
@@ -25,9 +25,9 @@ export const ledgerRepo = {
       FROM ledger_transactions
       WHERE voided_at IS NULL
     `);
-    const totalInflows = Number((cashResult?.inflows || 0).toFixed(2));
-    const totalOutflows = Number((cashResult?.outflows || 0).toFixed(2));
-    const liquidCash = Number((totalInflows - totalOutflows).toFixed(2));
+    const totalInflows = canonicalMoney(cashResult?.inflows || 0);
+    const totalOutflows = canonicalMoney(cashResult?.outflows || 0);
+    const liquidCash = canonicalMoney(totalInflows - totalOutflows);
 
     // 2. Active loan metrics
     const loanResult = await db.getFirstAsync<{
@@ -49,8 +49,8 @@ export const ledgerRepo = {
       FROM loans
       WHERE status IN ('ACTIVE', 'OVERDUE')
     `);
-    const expectedInterest = Number(
-      Math.max(0, (interestResult?.totalPayable || 0) - (interestResult?.totalPrincipal || 0)).toFixed(2)
+    const expectedInterest = canonicalMoney(
+      Math.max(0, (interestResult?.totalPayable || 0) - (interestResult?.totalPrincipal || 0))
     );
 
     // 4. Overdue amounts from schedules where due_date < today and not paid.
@@ -79,12 +79,12 @@ export const ledgerRepo = {
       liquidCash,
       totalInflows,
       totalOutflows,
-      outstandingPrincipal: Number((loanResult?.outstandingBalance || 0).toFixed(2)),
+      outstandingPrincipal: canonicalMoney(loanResult?.outstandingBalance || 0),
       expectedInterest,
-      overdueAmount: Number((overdueResult?.overdueSum || 0).toFixed(2)),
+      overdueAmount: canonicalMoney(overdueResult?.overdueSum || 0),
       activeBorrowersCount: Number(loanResult?.activeCount || 0),
       overdueBorrowersCount: Number(overdueResult?.overdueBorrowers || 0),
-      totalCollectedThisMonth: Number((monthlyResult?.monthTotal || 0).toFixed(2)),
+      totalCollectedThisMonth: canonicalMoney(monthlyResult?.monthTotal || 0),
     };
   },
 
@@ -220,7 +220,7 @@ export const ledgerRepo = {
           ) as remaining`,
         [detail.loan.totalPayable, detail.loan.id, detail.payment.paidAt]
       );
-      detail.balanceAfter = balanceRow ? Math.max(0, round2(balanceRow.remaining)) : null;
+      detail.balanceAfter = balanceRow ? Math.max(0, canonicalMoney(balanceRow.remaining)) : null;
 
       if (detail.payment.scheduleId) {
         detail.schedule =
@@ -273,7 +273,7 @@ export const ledgerRepo = {
     return rows.map((r) => ({
       category: r.category,
       description: r.description,
-      total: round2(Number(r.total ?? 0)),
+      total: canonicalMoney(Number(r.total ?? 0)),
       entries: Number(r.entries ?? 0),
     }));
   },

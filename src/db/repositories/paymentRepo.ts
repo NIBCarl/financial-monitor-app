@@ -7,7 +7,7 @@ import {
   getScheduleRemaining,
   rebuildScheduleStates,
 } from '../../utils/financial';
-import { round2 } from '../../utils/validation';
+import { canonicalMoney } from '../../utils/money';
 import { auditRepo } from './auditRepo';
 
 /** Money comparisons tolerate half a cent so 2-decimal rounding can never block a full settlement. */
@@ -60,7 +60,7 @@ export const paymentRepo = {
    *   6. returns the authoritative balance + next due date for the receipt.
    */
   async recordPayment(input: RecordPaymentInput): Promise<RecordPaymentResult> {
-    const amount = round2(input.amountPaid);
+    const amount = canonicalMoney(input.amountPaid);
 
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new Error('Payment amount must be greater than zero.');
@@ -81,7 +81,7 @@ export const paymentRepo = {
         throw new Error('This loan is already fully settled.');
       }
 
-      const outstanding = round2(loan.remaining_balance);
+      const outstanding = canonicalMoney(loan.remaining_balance);
       if (outstanding <= MONEY_EPSILON) {
         throw new Error('This loan has no outstanding balance.');
       }
@@ -127,7 +127,7 @@ export const paymentRepo = {
         );
       }
 
-      const remainingAfterPayment = round2(outstanding - amount);
+      const remainingAfterPayment = canonicalMoney(outstanding - amount);
       const settled = remainingAfterPayment <= MONEY_EPSILON;
       const persistedBalance = settled ? 0 : remainingAfterPayment;
 
@@ -320,10 +320,10 @@ export const paymentRepo = {
       }
 
       // 4. Balance is derived from the surviving cash, not from subtracting the void.
-      const totalPaid = round2(
-        survivingPayments.reduce((sum, row) => round2(sum + row.amountPaid), 0)
+      const totalPaid = canonicalMoney(
+        survivingPayments.reduce((sum, row) => sum + canonicalMoney(row.amountPaid), 0)
       );
-      const remainingBalance = Math.max(0, round2(loan.total_payable - totalPaid));
+      const remainingBalance = Math.max(0, canonicalMoney(loan.total_payable - totalPaid));
       const settled = remainingBalance <= MONEY_EPSILON;
 
       await txn.runAsync(`UPDATE loans SET remaining_balance = ?, status = ? WHERE id = ?`, [

@@ -11,6 +11,7 @@
   },
   "include": [
     "src/utils/validation.ts",
+    "src/utils/money.ts",
     "src/utils/financial.ts",
     "src/utils/reminderText.ts",
     "src/utils/sealText.ts",

@@ -1,4 +1,5 @@
 import { getDatabase } from '../client';
+import { canonicalMoney } from '../../utils/money';
 import { round2 } from '../../utils/validation';
 import { daysBetweenDates, localTodayString } from '../../utils/financial';
 
@@ -123,7 +124,7 @@ export const reportsRepo = {
         bucket: row.bucket as AgingBucket,
         installmentCount: Number(row.installmentCount ?? 0),
         borrowerCount: Number(row.borrowerCount ?? 0),
-        amount: round2(Number(row.amount ?? 0)),
+        amount: canonicalMoney(Number(row.amount ?? 0)),
       });
     }
 
@@ -157,8 +158,8 @@ export const reportsRepo = {
       WHERE l.status IN ('ACTIVE', 'OVERDUE')
     `);
 
-    const totalOutstanding = round2(Number(row?.totalOutstanding ?? 0));
-    const atRiskAmount = round2(Number(row?.atRiskAmount ?? 0));
+    const totalOutstanding = canonicalMoney(Number(row?.totalOutstanding ?? 0));
+    const atRiskAmount = canonicalMoney(Number(row?.atRiskAmount ?? 0));
 
     return {
       atRiskAmount,
@@ -193,7 +194,7 @@ export const reportsRepo = {
     );
     return rows.map((r) => ({
       period: r.period,
-      expected: round2(Number(r.expected ?? 0)),
+      expected: canonicalMoney(Number(r.expected ?? 0)),
       installmentCount: Number(r.installmentCount ?? 0),
     }));
   },
@@ -236,7 +237,7 @@ export const reportsRepo = {
       borrowerName: r.borrowerName,
       borrowerPhone: r.borrowerPhone,
       dueDate: r.dueDate,
-      amountDue: round2(Number(r.amountDue ?? 0)),
+      amountDue: canonicalMoney(Number(r.amountDue ?? 0)),
       daysLate: daysLateFor(r.dueDate, today),
     }));
   },
