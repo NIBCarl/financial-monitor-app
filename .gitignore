@@ -54,3 +54,8 @@ example
 # generated native folders
 /ios
 /android
+
+# agent skills installed with `npx skills add` (tooling, not app code)
+.agents/
+.claude/
+skills-lock.json

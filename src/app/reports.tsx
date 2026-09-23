@@ -29,7 +29,8 @@ import * as Sharing from 'expo-sharing';
 import { ledgerRepo } from '../db/repositories/ledgerRepo';
 import { borrowerRepo } from '../db/repositories/borrowerRepo';
 import { settingsRepo } from '../db/repositories/settingsRepo';
-import { resetEntireDatabase } from '../db/client';
+import { resetEntireDatabase } from '../db/maintenance';
+import { countTables } from '../db/tables';
 import { DashboardMetrics } from '../db/types';
 import { useAppStore } from '../stores/useAppStore';
 import { VerifyReceiptModal } from '../components/VerifyReceiptModal';
@@ -58,6 +59,7 @@ import {
   type StoredBackup,
 } from '../services/backupService';
 import { DeviceBackupsModal } from '../components/DeviceBackupsModal';
+import { ConfirmReasonModal } from '../components/ConfirmReasonModal';
 import { format } from 'date-fns';
 
 export default function ReportsScreen() {
@@ -91,6 +93,7 @@ export default function ReportsScreen() {
   const [deviceBackups, setDeviceBackups] = useState<StoredBackup[]>([]);
   const [autoBackupNote, setAutoBackupNote] = useState('');
   const [deviceBackupsVisible, setDeviceBackupsVisible] = useState(false);
+  const [wipeReasonVisible, setWipeReasonVisible] = useState(false);
   const [verifyVisible, setVerifyVisible] = useState(false);
   const [aging, setAging] = useState<AgingRow[]>([]);
   const [risk, setRisk] = useState<PortfolioRisk>({
@@ -166,7 +169,7 @@ export default function ReportsScreen() {
 
       Alert.alert(
         'Automatic Backup Saved',
-        `Kept on this device as ${summary.fileName}. The ${AUTO_BACKUP_KEEP} newest automatic copies are kept, older ones are deleted.`,
+        `Kept on this device as ${summary.fileName}. The ${AUTO_BACKUP_KEEP} newest automatic copies are kept, older ones are deleted.\n\nThis file holds every borrower's name, phone number and balance in plain text; send it only to yourself. The receipt signing secret is not included.`,
         [
           { text: 'Done', style: 'cancel' },
           {
@@ -201,7 +204,7 @@ export default function ReportsScreen() {
 
       Alert.alert(
         'Backup Created',
-        `${summary.fileName}\n\nBorrowers: ${summary.counts.borrowers}\nLoans: ${summary.counts.loans}\nPayments: ${summary.counts.loan_payments}\n\nShare it to Drive or email so the records survive a lost phone.`,
+        `${summary.fileName}\n\nBorrowers: ${summary.counts.borrowers}\nLoans: ${summary.counts.loans}\nPayments: ${summary.counts.loan_payments}\n\nThis file holds every borrower's name, phone number and balance in plain text. Send it only to yourself, and only over a channel you trust. The device's receipt signing secret is not included.`,
         [
           { text: 'Later', style: 'cancel' },
           {
@@ -224,11 +227,19 @@ export default function ReportsScreen() {
   const applyRestore = async (payload: BackupPayload) => {
     try {
       setBackupBusy(true);
-      const inserted = await restoreBackup(payload);
+      const result = await restoreBackup(payload);
       triggerRefresh();
+
+      const { inserted } = result;
+      // Evidence is reported separately, because "the trail on this device was kept, not replaced"
+      // is exactly what the treasurer needs to know after a restore.
+      const evidenceLine = result.evidenceKept
+        ? `\n\nThe ${result.evidenceKept} existing audit/seal rows on this device were kept and the restore itself was recorded.`
+        : '\n\nThe restore was recorded in the audit trail.';
+
       Alert.alert(
         'Restore Complete',
-        `Restored ${inserted.borrowers} borrowers, ${inserted.loans} loans, ${inserted.loan_schedules} installments, ${inserted.loan_payments} payments and ${inserted.ledger_transactions} ledger entries.`
+        `Restored ${inserted.borrowers} borrowers, ${inserted.loans} loans, ${inserted.loan_schedules} installments, ${inserted.loan_payments} payments, ${inserted.ledger_transactions} ledger entries, ${inserted.penalty_charges} penalty charges and ${inserted.signatures} signatures.${evidenceLine}`
       );
     } catch (err) {
       Alert.alert('Restore Failed', err instanceof Error ? err.message : 'Could not restore the backup.');
@@ -250,9 +261,15 @@ export default function ReportsScreen() {
       }
 
       const payload = validation.payload;
+      const carriesEvidence = (payload.counts.audit_log ?? 0) > 0 || (payload.counts.ledger_seals ?? 0) > 0;
+
       Alert.alert(
-        'Replace All Data?',
-        `Backup from ${formatDbDate(payload.generatedAt)} contains:\n\n${describeBackup(payload)}\n\nRestoring replaces every current record and cannot be undone.`,
+        'Replace All Records?',
+        `Backup from ${formatDbDate(payload.generatedAt)} contains:\n\n${describeBackup(payload)}\n\nRestoring replaces the ${countTables('business')} record tables on this device and cannot be undone.${
+          carriesEvidence
+            ? ' The file also carries an audit trail and seals, which are used only if this device has none of its own.'
+            : ' The existing audit trail and published seals on this device are kept.'
+        }`,
         [
           { text: 'Cancel', style: 'cancel' },
           {
@@ -271,26 +288,51 @@ export default function ReportsScreen() {
     }
   };
 
+  /**
+   * Erasing the book is the most destructive thing this app can do, so it now takes two deliberate
+   * steps and leaves a record behind:
+   *
+   *  1. A summary of exactly what will go — every record table *and* the audit trail, which used to
+   *     survive a "reset" and keep the borrowers' names on the device — with a one-tap offer to
+   *     write a backup first.
+   *  2. The shared reason sheet, which requires a written reason; that reason becomes the first
+   *     entry of the fresh audit chain, so the erase is itself provable.
+   *
+   * The copies in `documents/backups` are kept, which is what makes a mistake recoverable from
+   * Restore a Device Backup just below.
+   */
   const handleResetData = () => {
     Alert.alert(
-      'Reset Entire Database?',
-      'This will permanently clear all borrower profiles, loans, payments, and ledger entries for a clean slate. This action cannot be undone.',
+      'Erase Every Record?',
+      [
+        `This removes the ${countTables('business')} record tables (borrowers, loans, installments, payments, ledger, fines, signatures, preferences)`,
+        `and the ${countTables('evidence')} evidence tables (audit trail, published seals), because those carry the same names and amounts.`,
+        '',
+        'Backups already saved on this device are kept, so you can still restore one. This cannot be undone.',
+      ].join('\n'),
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Erase All Data',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await resetEntireDatabase();
-              triggerRefresh();
-              Alert.alert('Database Cleaned', 'All sample and user data have been reset to a fresh clean slate.');
-            } catch (err: any) {
-              Alert.alert('Error', err?.message || 'Failed to reset database.');
-            }
+          text: 'Back Up First',
+          onPress: () => {
+            void (async () => {
+              await handleAutoBackupNow();
+              setWipeReasonVisible(true);
+            })();
           },
         },
+        { text: 'Continue', style: 'destructive', onPress: () => setWipeReasonVisible(true) },
       ]
+    );
+  };
+
+  const handleConfirmWipe = async (reason: string) => {
+    await resetEntireDatabase(reason);
+    triggerRefresh();
+    await loadData();
+    Alert.alert(
+      'Book Erased',
+      'Every record has been removed. The erase itself is the first entry of the new audit trail.'
     );
   };
 
@@ -691,6 +733,18 @@ Generated from Treasurer Mobile Ledger
           triggerRefresh();
           void loadData();
         }}
+      />
+
+      <ConfirmReasonModal
+        visible={wipeReasonVisible}
+        title="Erase every record"
+        message="Write down why the book is being erased. This becomes the first entry of the new audit trail, so anyone who looks at this device later can see the erase happened and why."
+        confirmLabel="Erase Everything"
+        destructive
+        reasonLabel="Reason (kept in the audit log)"
+        reasonPlaceholder="e.g. starting a new fiscal year with a clean book"
+        onCancel={() => setWipeReasonVisible(false)}
+        onConfirm={handleConfirmWipe}
       />
     </SafeAreaView>
   );

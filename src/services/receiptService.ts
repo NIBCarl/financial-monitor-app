@@ -1,8 +1,10 @@
 import { Share } from 'react-native';
 import * as Crypto from 'expo-crypto';
+import * as SecureStore from 'expo-secure-store';
 import { LoanPayment, ReceiptData } from '../db/types';
 import { formatCurrency, formatDatePretty, formatDbDateTime } from '../utils/financial';
 import { canonicalMoney } from '../utils/money';
+import { planReceiptSecret } from '../utils/secrets';
 import { settingsRepo } from '../db/repositories/settingsRepo';
 
 /**
@@ -16,6 +18,9 @@ import { settingsRepo } from '../db/repositories/settingsRepo';
 
 const MONEY_EPSILON = 0.004;
 const DIVIDER = '──────────────────────';
+
+/** Key under which the receipt signing secret is held in the OS keystore. */
+const RECEIPT_SECRET_KEY = 'receipt_secret';
 
 /** Version prefix for the machine-readable verification token. */
 export const VERIFICATION_TOKEN_PREFIX = 'TV1';
@@ -80,20 +85,72 @@ export function parseVerificationToken(text: string): { fields: ReceiptVerificat
 }
 
 /**
- * The signing secret. Stored with the data (not in a secure element), which is the honest
- * trade-off here: it makes a *shared receipt* impossible to edit after the fact, while anyone
- * with full database access could in principle forge one.
+ * The signing secret, kept in the OS keystore (Android Keystore / iOS Keychain).
+ *
+ * It used to live in `app_settings`, which had two consequences that made the whole
+ * "your receipt cannot be edited" claim weaker than it looked: the SQLite file is unencrypted
+ * (§20.8), and `app_settings` is one of the tables a backup exports — so the secret travelled
+ * inside the very file the app tells the treasurer to email to themselves. Anyone holding a
+ * backup could forge a receipt that verifies (OWASP MASWE-0003 and MASWE-0006).
+ *
+ * The precedence rules live in `utils/secrets` (pure, harness-tested): the keystore copy wins; a
+ * legacy in-database copy is adopted exactly once so receipts already in borrowers' hands keep
+ * verifying, and then deleted; a new secret is generated only when there is nothing to adopt.
  */
 export async function getReceiptSecret(): Promise<string> {
-  const existing = await settingsRepo.get('receipt_secret');
-  if (existing) return existing;
+  const deviceSecret = await readDeviceSecret();
+  const legacySecret = await settingsRepo.get('receipt_secret');
 
+  // An empty `generated` keeps the CSPRNG call out of the common path (a secret already exists).
+  const plan = planReceiptSecret(deviceSecret, legacySecret, '');
+  if (plan.source === 'device') {
+    // A restore can put a foreign secret back into the database (a backup written before this
+    // change carries one). The keystore copy is authoritative, so the stray row is removed —
+    // otherwise it would linger on the device and inside "the trail" for no reason.
+    if (legacySecret && legacySecret !== plan.secret) {
+      await settingsRepo.clear('receipt_secret');
+    }
+    return plan.secret;
+  }
+
+  const secret = plan.source === 'legacy' ? plan.secret : await generateSecret();
+
+  await writeDeviceSecret(secret);
+  if (plan.clearLegacy) {
+    // Remove the in-database copy: from here on the secret is device-only, so it can never
+    // travel inside a backup again.
+    await settingsRepo.clear('receipt_secret');
+  }
+
+  return secret;
+}
+
+/** 32 random bytes as hex. `getRandomBytesAsync` is the platform CSPRNG. */
+async function generateSecret(): Promise<string> {
   const bytes = await Crypto.getRandomBytesAsync(32);
-  const secret = Array.from(bytes)
+  return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
-  await settingsRepo.set('receipt_secret', secret);
-  return secret;
+}
+
+/** Reads the keystore copy. Returns null when the platform has no keystore (web preview). */
+async function readDeviceSecret(): Promise<string | null> {
+  try {
+    return await SecureStore.getItemAsync(RECEIPT_SECRET_KEY);
+  } catch (err) {
+    console.warn('Secure storage unavailable; falling back to the database copy:', err);
+    return null;
+  }
+}
+
+/** Writes the keystore copy; on a platform without one, keeps the in-database copy instead. */
+async function writeDeviceSecret(secret: string): Promise<void> {
+  try {
+    await SecureStore.setItemAsync(RECEIPT_SECRET_KEY, secret);
+  } catch (err) {
+    console.warn('Secure storage unavailable; keeping the secret in the database:', err);
+    await settingsRepo.set('receipt_secret', secret);
+  }
 }
 
 /** Computes the short verification code for a receipt (async: HMAC-style SHA-256 digest). */

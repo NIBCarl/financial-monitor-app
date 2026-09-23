@@ -87,23 +87,4 @@ export async function optimizeDatabase(): Promise<void> {
   await db.execAsync(`PRAGMA optimize;`);
 }
 
-/**
- * Deletes every business record (borrowers, loans, schedules, payments, ledger)
- * while keeping treasurer preferences. Runs in one transaction so a failure cannot
- * leave a partially wiped database behind.
- */
-export async function resetEntireDatabase(): Promise<void> {
-  await runWriteTransaction(async (handle) => {
-    await handle.execAsync(`
-      DELETE FROM loan_payments;
-      DELETE FROM loan_schedules;
-      DELETE FROM loans;
-      DELETE FROM borrowers;
-      DELETE FROM ledger_transactions;
-    `);
-  });
-
-  const db = await getDatabase();
-  await db.execAsync(`PRAGMA optimize;`);
-}
 

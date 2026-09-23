@@ -11,6 +11,8 @@ const penalties = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'pe
 const qr = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'qr.js'));
 const signature = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'signature.js'));
 const backupPolicy = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'backup.js'));
+const secrets = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'secrets.js'));
+const tables = require(path.join(__dirname, '..', '.verify-tmp', 'db', 'tables.js'));
 
 const { parseMoney, parsePositiveMoney, parseTermCount, parseInterestRate, round2, sanitizePhoneForUri, csvCell, csvRow, MAX_MONEY } = validation;
 const {
@@ -58,6 +60,8 @@ const {
   checksumOf,
   serialiseBackupTables,
 } = backupPolicy;
+const { stripDeviceSecrets, planReceiptSecret, DEVICE_SECRET_SETTING_KEYS } = secrets;
+const { TABLE_SPECS, BACKUP_TABLE_ORDER, tablesOfKind, isEvidenceTable, countTables } = tables;
 
 let passed = 0;
 const check = (label, fn) => {
@@ -791,6 +795,120 @@ check('a missing table serialises as empty, so an absent section cannot change a
     serialiseBackupTables(missing, LEGACY_TABLES),
     serialiseBackupTables(withEmpty, LEGACY_TABLES)
   );
+});
+
+/* ------------------------------------------- table registry + device secrets (audit findings) */
+
+check('the table registry has no duplicates and covers records and evidence', () => {
+  const names = TABLE_SPECS.map((spec) => spec.name);
+  assert.strictEqual(new Set(names).size, names.length, 'duplicate table name');
+
+  const business = tablesOfKind('business');
+  const evidence = tablesOfKind('evidence');
+  assert.deepStrictEqual([...business, ...evidence].sort(), [...names].sort());
+  assert.strictEqual(business.length + evidence.length, names.length);
+  assert.strictEqual(countTables('business'), business.length);
+  assert.strictEqual(BACKUP_TABLE_ORDER.length, names.length);
+});
+
+check('records and evidence are classified the way the restore and wipe rely on', () => {
+  // Records: replaced by a restore, erased by a wipe.
+  for (const name of [
+    'borrowers',
+    'loans',
+    'loan_schedules',
+    'loan_payments',
+    'ledger_transactions',
+    'app_settings',
+    'penalty_rules',
+    'penalty_charges',
+    'signatures',
+  ]) {
+    assert.ok(tablesOfKind('business').includes(name), `${name} should be a record table`);
+    assert.strictEqual(isEvidenceTable(name), false);
+  }
+
+  // Evidence: never deleted by a restore, because a backup may not carry it at all.
+  for (const name of ['audit_log', 'ledger_seals']) {
+    assert.ok(tablesOfKind('evidence').includes(name), `${name} should be evidence`);
+    assert.strictEqual(isEvidenceTable(name), true);
+  }
+
+  assert.strictEqual(isEvidenceTable('not_a_table'), false);
+});
+
+check('insert order keeps every child after its parent', () => {
+  const at = (name) => BACKUP_TABLE_ORDER.indexOf(name);
+  const after = [
+    ['loans', 'borrowers'],
+    ['loan_schedules', 'loans'],
+    ['loan_payments', 'loans'],
+    ['penalty_rules', 'borrowers'],
+    ['penalty_charges', 'loans'],
+    ['signatures', 'borrowers'],
+  ];
+  for (const [child, parent] of after) {
+    assert.ok(at(child) > at(parent), `${child} must be inserted after ${parent}`);
+  }
+  // Evidence comes last, so a restore can decide about it after the records are in place.
+  assert.ok(at('audit_log') > at('signatures'));
+  assert.ok(at('ledger_seals') > at('signatures'));
+});
+
+check('every table declares the schema version that introduced it', () => {
+  for (const spec of TABLE_SPECS) {
+    assert.ok(Number.isInteger(spec.since) && spec.since >= 1, `${spec.name} has a bad \`since\``);
+    assert.ok(spec.since <= 5, `${spec.name} claims a future schema version`);
+    assert.ok(spec.label.length > 0, `${spec.name} has no dialog label`);
+  }
+});
+
+check('device secrets never enter a backup file', () => {
+  const rows = [
+    { key: 'currency_symbol', value: 'PHP' },
+    { key: 'receipt_secret', value: 'deadbeef' },
+    { key: 'org_name', value: 'Community Treasury' },
+  ];
+  const safe = stripDeviceSecrets(rows);
+
+  assert.strictEqual(safe.length, 2);
+  assert.deepStrictEqual(safe.map((row) => row.key), ['currency_symbol', 'org_name']);
+  assert.ok(DEVICE_SECRET_SETTING_KEYS.includes('receipt_secret'));
+  // The input is not mutated, and a row without a key survives untouched.
+  assert.strictEqual(rows.length, 3);
+  assert.strictEqual(stripDeviceSecrets([{ value: 'orphan' }]).length, 1);
+  assert.deepStrictEqual(stripDeviceSecrets([]), []);
+});
+
+check('a receipt secret already on the device always wins', () => {
+  const plan = planReceiptSecret('aaa-device', 'bbb-legacy', 'ccc-generated');
+  assert.strictEqual(plan.secret, 'aaa-device');
+  assert.strictEqual(plan.source, 'device');
+  // Nothing to clean up: the legacy row is only deleted when it was actually adopted.
+  assert.strictEqual(plan.clearLegacy, false);
+});
+
+check('an upgrade adopts the in-database secret once, then removes it', () => {
+  const plan = planReceiptSecret(null, 'legacy-secret', 'generated');
+  assert.strictEqual(plan.secret, 'legacy-secret');
+  assert.strictEqual(plan.source, 'legacy');
+  // This is what keeps receipts already in borrowers' hands verifiable after the upgrade.
+  assert.strictEqual(plan.clearLegacy, true);
+
+  const afterUpgrade = planReceiptSecret('legacy-secret', '', 'generated');
+  assert.strictEqual(afterUpgrade.secret, 'legacy-secret');
+  assert.strictEqual(afterUpgrade.source, 'device');
+  assert.strictEqual(afterUpgrade.clearLegacy, false);
+});
+
+check('a fresh device gets a generated secret, and blank values never win', () => {
+  const plan = planReceiptSecret(undefined, '', 'generated-secret');
+  assert.strictEqual(plan.secret, 'generated-secret');
+  assert.strictEqual(plan.source, 'new');
+  assert.strictEqual(plan.clearLegacy, false);
+
+  assert.strictEqual(planReceiptSecret('   ', '  ', 'g').secret, 'g');
+  assert.strictEqual(planReceiptSecret('  spaced  ', null, 'g').secret, 'spaced');
 });
 
 console.log(`\n${passed} checks passed${process.exitCode ? ' (WITH FAILURES)' : ' — all good'}\n`);

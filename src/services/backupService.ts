@@ -2,7 +2,17 @@ import { Directory, File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import * as DocumentPicker from 'expo-document-picker';
 import { getDatabase, runWriteTransaction } from '../db/client';
+import { hasAnyRecords } from '../db/maintenance';
 import { SCHEMA_VERSION } from '../db/migrations';
+import {
+  BACKUP_TABLE_ORDER,
+  TABLE_SINCE,
+  TABLE_SPECS,
+  isEvidenceTable,
+  tablesOfKind,
+  type BackupTable,
+} from '../db/tables';
+import { auditRepo } from '../db/repositories/auditRepo';
 import { settingsRepo } from '../db/repositories/settingsRepo';
 import {
   AUTO_BACKUP_KEEP,
@@ -15,6 +25,7 @@ import {
   selectAutoBackupsToDelete,
   serialiseBackupTables,
 } from '../utils/backup';
+import { stripDeviceSecrets } from '../utils/secrets';
 
 /**
  * Local backup & restore.
@@ -30,36 +41,13 @@ import {
 export const BACKUP_FORMAT = 'treasurer-vault-backup';
 
 /**
- * Every table that carries business meaning, with the schema version that introduced it.
- *
- * `since` matters on restore: a backup written by an older app legitimately has no `signatures`
- * section, and refusing to restore it because of a table that did not exist yet would strand the
- * very backups this feature exists to bring back.
+ * The tables a backup carries come from the one registry in `db/tables.ts` — the same list the
+ * wipe uses, so the two can no longer drift apart (they already had: the wipe cleared 5 tables
+ * while a backup carried 6).
  */
-const TABLE_SPECS = [
-  { name: 'borrowers', since: 1, label: 'Borrowers' },
-  { name: 'loans', since: 1, label: 'Loans' },
-  { name: 'loan_schedules', since: 1, label: 'Installments' },
-  { name: 'loan_payments', since: 1, label: 'Payments' },
-  { name: 'ledger_transactions', since: 1, label: 'Ledger entries' },
-  { name: 'app_settings', since: 1, label: 'Preferences' },
-  { name: 'audit_log', since: 2, label: 'Audit entries' },
-  { name: 'ledger_seals', since: 3, label: 'Month seals' },
-  { name: 'penalty_rules', since: 4, label: 'Penalty rules' },
-  { name: 'penalty_charges', since: 4, label: 'Penalty charges' },
-  { name: 'signatures', since: 5, label: 'Signatures' },
-] as const;
+const BACKUP_TABLES = BACKUP_TABLE_ORDER;
 
-export type BackupTable = (typeof TABLE_SPECS)[number]['name'];
-
-/** Insert order respects foreign keys; deletion happens in reverse. */
-const BACKUP_TABLES: readonly BackupTable[] = TABLE_SPECS.map((spec) => spec.name);
-
-const TABLE_SINCE: Record<BackupTable, number> = TABLE_SPECS.reduce(
-  (acc, spec) => ({ ...acc, [spec.name]: spec.since }),
-  {} as Record<BackupTable, number>
-);
-
+export type { BackupTable };
 export type BackupData = Record<BackupTable, Record<string, unknown>[]>;
 
 export interface BackupPayload {
@@ -95,8 +83,14 @@ async function buildBackupJson(): Promise<{ json: string; payload: BackupPayload
 
   for (const table of BACKUP_TABLES) {
     const rows = await db.getAllAsync<Record<string, unknown>>(`SELECT * FROM ${table}`);
-    data[table] = rows;
-    counts[table] = rows.length;
+
+    // Preferences travel for the currency symbol and the organisation name, but device-only
+    // secrets never leave: see utils/secrets — a backup is a file the treasurer emails to
+    // themselves, and it must not be a receipt-forging kit.
+    const safeRows = table === 'app_settings' ? stripDeviceSecrets(rows) : rows;
+
+    data[table] = safeRows;
+    counts[table] = safeRows.length;
   }
 
   const payload: BackupPayload = {
@@ -270,6 +264,19 @@ export async function runAutoBackupIfDue(): Promise<AutoBackupOutcome> {
     };
   }
 
+  // An empty book is not worth a rotation slot: after a deliberate wipe, automatic backups of an
+  // empty database would otherwise evict the copies that still hold the erased records — the very
+  // files the treasurer would want to restore from.
+  if (!(await hasAnyRecords())) {
+    return {
+      created: false,
+      summary: null,
+      lastBackupAt: lastBackupAt ?? '',
+      ageLabel: describeBackupAge(lastBackupAt, now),
+      stale: isBackupStale(lastBackupAt, now),
+    };
+  }
+
   const summary = await createAutoBackup();
   await settingsRepo.set('last_backup_at', summary.generatedAt);
 
@@ -402,15 +409,36 @@ export function describeBackup(payload: BackupPayload): string {
   return TABLE_SPECS.map((spec) => `${spec.label}: ${counts[spec.name] ?? 0}`).join('\n');
 }
 
+export interface RestoreResult {
+  /** Rows written per table. */
+  inserted: Record<BackupTable, number>;
+  /** Evidence rows the file did **not** carry, which were left in place instead of deleted. */
+  evidenceKept: number;
+  /** Business rows that were replaced. */
+  replaced: number;
+}
+
 /**
- * Replaces the entire database with the contents of a validated backup, in one exclusive
- * transaction: either every table is restored, or nothing changes at all.
+ * Replaces the records with the contents of a validated backup, in one exclusive transaction.
+ *
+ * Two rules that matter more than the mechanics:
+ *
+ *  1. **Business tables are replaced; evidence tables are merged.** The audit trail and the
+ *     published seals are the only thing that can prove what happened, and a backup written before
+ *     1.0.5 does not carry them at all. Deleting them because the file is silent about them would
+ *     destroy evidence the treasurer may already have published to members.
+ *  2. **The restore itself is recorded.** The restored trail is followed by one new entry saying
+ *     the book was replaced and from which file, chain-linked to whatever head the merged trail
+ *     ended on. Otherwise the app's central claim — every change is on the record — would have a
+ *     hole exactly where the biggest change happens.
  */
-export async function restoreBackup(payload: BackupPayload): Promise<Record<BackupTable, number>> {
+export async function restoreBackup(payload: BackupPayload): Promise<RestoreResult> {
   const inserted = {} as Record<BackupTable, number>;
+  let evidenceKept = 0;
 
   await runWriteTransaction(async (txn) => {
-    for (const table of [...BACKUP_TABLES].reverse()) {
+    // Records first: children before parents.
+    for (const table of [...tablesOfKind('business')].reverse()) {
       await txn.execAsync(`DELETE FROM ${table}`);
     }
 
@@ -423,6 +451,24 @@ export async function restoreBackup(payload: BackupPayload): Promise<Record<Back
       // quoted and validated against a strict identifier pattern before it reaches SQL.
       const columns = Object.keys(rows[0]).filter((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name));
       if (columns.length === 0) continue;
+
+      const evidence = isEvidenceTable(table);
+      if (evidence) {
+        const existing = await txn.getFirstAsync<{ total: number }>(
+          `SELECT COUNT(*) as total FROM ${table}`
+        );
+        const existingCount = Number(existing?.total ?? 0);
+
+        // The device's own evidence is authoritative when it has any: it is the same chain the
+        // backup came from, only longer. Merging two chains would break verification (the walk
+        // requires each entry to link to the one before it) and raise a false tamper alarm, which
+        // for a trust feature is nearly as bad as missing a real one. The file's evidence is
+        // adopted only when the device has none — a new phone, or after a wipe.
+        if (existingCount > 0) {
+          evidenceKept += existingCount;
+          continue;
+        }
+      }
 
       const columnList = columns.map((c) => `"${c}"`).join(', ');
       const valueList = columns.map(() => '?').join(', ');
@@ -439,8 +485,23 @@ export async function restoreBackup(payload: BackupPayload): Promise<Record<Back
         await statement.finalizeAsync();
       }
     }
+
+    const replaced = tablesOfKind('business').reduce((sum, table) => sum + inserted[table], 0);
+
+    await auditRepo.logWith(txn, {
+      entity: 'database',
+      entityId: payload.generatedAt,
+      action: 'RESTORE',
+      reason: `Book replaced from backup ${payload.generatedAt} (schema v${payload.schemaVersion})`,
+      after: {
+        replaced,
+        inserted: inserted as unknown as Record<string, number>,
+        evidenceKept,
+      },
+    });
   });
 
-  return inserted;
+  const replaced = tablesOfKind('business').reduce((sum, table) => sum + inserted[table], 0);
+  return { inserted, evidenceKept, replaced };
 }
 

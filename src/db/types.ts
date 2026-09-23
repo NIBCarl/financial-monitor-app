@@ -72,9 +72,11 @@ export type AuditEntity =
   | 'settings'
   | 'penalty_rule'
   | 'penalty_charge'
-  | 'signature';
+  | 'signature'
+  /** The book itself: a restore from a backup file, or a deliberate wipe. */
+  | 'database';
 
-export type AuditAction = 'CREATE' | 'UPDATE' | 'VOID' | 'WAIVE';
+export type AuditAction = 'CREATE' | 'UPDATE' | 'VOID' | 'WAIVE' | 'RESTORE' | 'WIPE';
 
 /**
  * A penalty policy the treasury writes down once and the app applies.

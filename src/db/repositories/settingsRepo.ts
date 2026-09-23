@@ -12,7 +12,12 @@ export type SettingKey =
   | 'currency_symbol'
   | 'org_name'
   | 'last_backup_at'
-  /** Signing secret for receipt verification codes (generated on first use). */
+  /**
+   * Legacy home of the receipt signing secret. It now lives in the OS keystore (see
+   * `services/receiptService` and `utils/secrets`); this key is still read once so an upgrade
+   * adopts the existing secret — which keeps receipts already handed out verifiable — and is then
+   * deleted. It is also the fallback on platforms with no keystore (the web preview).
+   */
   | 'receipt_secret';
 
 export const DEFAULT_SETTINGS: Record<SettingKey, string> = {
@@ -63,6 +68,16 @@ export const settingsRepo = {
   /** Upserts a single setting. */
   async set(key: SettingKey, value: string): Promise<void> {
     await this.setMany({ [key]: value } as Partial<Record<SettingKey, string>>);
+  },
+
+  /**
+   * Removes a setting. Used to delete the legacy receipt-secret copy once it has been adopted into
+   * the OS keystore, so it can never travel inside a backup file again.
+   */
+  async clear(key: SettingKey): Promise<void> {
+    await runWriteTransaction(async (txn) => {
+      await txn.runAsync(`DELETE FROM app_settings WHERE key = ?`, [key]);
+    });
   },
 
   /** Upserts several settings atomically. */
