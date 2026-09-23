@@ -2,7 +2,7 @@
   "expo": {
     "name": "Treasurer Vault",
     "slug": "treasurer-vault",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "treasurervault",
@@ -14,7 +14,7 @@
     },
     "android": {
       "package": "com.treasurer.financialmonitor",
-      "versionCode": 4,
+      "versionCode": 5,
       "allowBackup": false,
       "adaptiveIcon": {
         "backgroundColor": "#0c4a6e",
