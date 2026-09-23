@@ -186,6 +186,26 @@ export function getDaysLate(dueDateString: string): number {
   }
 }
 
+/** Today's local calendar date as `YYYY-MM-DD` — the format `due_date` is stored in. */
+export function localTodayString(now: Date = new Date()): string {
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+/**
+ * Signed day difference between two calendar dates (positive when `dueDate` is in the past).
+ *
+ * Unlike `getDaysLate` this takes "today" as an argument, which makes it testable and lets the
+ * SQL-side buckets and the TypeScript-side pills agree on the same date.
+ */
+export function daysBetweenDates(dueDate: string, today: string): number {
+  const due = Date.parse(`${dueDate}T00:00:00Z`);
+  const now = Date.parse(`${today}T00:00:00Z`);
+  if (Number.isNaN(due) || Number.isNaN(now)) return 0;
+  return Math.round((now - due) / 86400000);
+}
+
 /** Outstanding amount of a single installment (never negative). */
 export function getScheduleRemaining(schedule: Pick<LoanSchedule, 'expectedAmount' | 'paidAmount'>): number {
   return Math.max(0, round2(schedule.expectedAmount - schedule.paidAmount));

@@ -31,6 +31,9 @@ import { resetEntireDatabase } from '../db/client';
 import { DashboardMetrics } from '../db/types';
 import { useAppStore } from '../stores/useAppStore';
 import { VerifyReceiptModal } from '../components/VerifyReceiptModal';
+import { PortfolioHealthCard } from '../components/PortfolioHealthCard';
+import { IntegrityPanel } from '../components/IntegrityPanel';
+import { reportsRepo, type AgingRow, type ForecastRow, type PortfolioRisk } from '../db/repositories/reportsRepo';
 import { formatCurrency, formatDbDate } from '../utils/financial';
 import {
   createBackup,
@@ -71,15 +74,30 @@ export default function ReportsScreen() {
   const [lastBackupAt, setLastBackupAt] = useState('');
   const [backupBusy, setBackupBusy] = useState(false);
   const [verifyVisible, setVerifyVisible] = useState(false);
+  const [aging, setAging] = useState<AgingRow[]>([]);
+  const [risk, setRisk] = useState<PortfolioRisk>({
+    atRiskAmount: 0,
+    totalOutstanding: 0,
+    parPercent: 0,
+    atRiskLoanCount: 0,
+    activeLoanCount: 0,
+  });
+  const [forecast, setForecast] = useState<ForecastRow[]>([]);
 
   const loadData = useCallback(async () => {
     try {
-      const [metrics, lastBackup] = await Promise.all([
+      const [metrics, lastBackup, agingRows, riskRow, forecastRows] = await Promise.all([
         ledgerRepo.getMetrics(),
         settingsRepo.get('last_backup_at'),
+        reportsRepo.getAgingSchedule(),
+        reportsRepo.getPortfolioRisk(),
+        reportsRepo.getForecast(3),
       ]);
       setMetrics(metrics);
       setLastBackupAt(lastBackup);
+      setAging(agingRows);
+      setRisk(riskRow);
+      setForecast(forecastRows);
     } catch (err) {
       console.error(err);
     }
@@ -310,6 +328,23 @@ Generated from Treasurer Mobile Ledger
               : `${metrics.overdueBorrowersCount} borrower(s) currently overdue.`}
           </Text>
         </View>
+
+        {/* Portfolio health — aging, portfolio-at-risk and expected collections */}
+        <Text style={styles.sectionTitle}>Portfolio Health</Text>
+        <PortfolioHealthCard
+          aging={aging}
+          risk={risk}
+          forecast={forecast}
+          currencySymbol={currencySymbol}
+        />
+
+        {/* Trust: audit chain, books check, seals, PDF */}
+        <Text style={styles.sectionTitle}>Trust &amp; Evidence</Text>
+        <IntegrityPanel
+          orgName={organizationName}
+          currencySymbol={currencySymbol}
+          onChanged={triggerRefresh}
+        />
 
         {/* Export & Sharing Options */}
         <Text style={styles.sectionTitle}>Reports & Sharing</Text>

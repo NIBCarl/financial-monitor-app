@@ -13,7 +13,7 @@ import { Platform } from 'react-native';
  * without touching their data.
  */
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /** Subset of the database API a migration may use (a Transaction satisfies this too). */
 type SqlRunner = Pick<SQLite.SQLiteDatabase, 'execAsync' | 'runAsync' | 'getFirstAsync' | 'getAllAsync'>;
@@ -181,6 +181,44 @@ const MIGRATIONS: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
         CREATE INDEX IF NOT EXISTS idx_payments_active ON loan_payments(loan_id, voided_at);
         CREATE INDEX IF NOT EXISTS idx_ledger_voided ON ledger_transactions(voided_at);
+      `);
+    },
+  },
+  {
+    version: 3,
+    name: 'audit_hash_chain_and_seals',
+    /**
+     * Tamper-evidence upgrade.
+     *
+     * v2 already records *what* changed, but a single-operator device could rewrite the trail
+     * itself. Each audit entry now carries the hash of the entry before it, so silently editing
+     * or deleting history breaks every hash after the change point.
+     *
+     * Rows written before this migration have no hash (NULL) and are reported as "unsigned";
+     * the chain starts at the first signed entry, so existing installs upgrade cleanly.
+     */
+    up: async (db) => {
+      await db.execAsync(`
+        ALTER TABLE audit_log ADD COLUMN prev_hash TEXT;
+        ALTER TABLE audit_log ADD COLUMN entry_hash TEXT;
+
+        CREATE TABLE IF NOT EXISTS ledger_seals (
+          id TEXT PRIMARY KEY NOT NULL,
+          period TEXT NOT NULL,
+          chain_head TEXT NOT NULL,
+          audit_count INTEGER NOT NULL,
+          inflow_total REAL NOT NULL,
+          outflow_total REAL NOT NULL,
+          outstanding_total REAL NOT NULL,
+          overdue_total REAL NOT NULL,
+          active_loans INTEGER NOT NULL,
+          borrower_count INTEGER NOT NULL,
+          seal_code TEXT NOT NULL,
+          note TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_seals_period ON ledger_seals(period, created_at);
       `);
     },
   },

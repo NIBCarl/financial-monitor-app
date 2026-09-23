@@ -4,6 +4,8 @@ const path = require('path');
 
 const validation = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'validation.js'));
 const financial = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'financial.js'));
+const reminderText = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'reminderText.js'));
+const sealText = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'sealText.js'));
 
 const { parseMoney, parsePositiveMoney, parseTermCount, parseInterestRate, round2, sanitizePhoneForUri } = validation;
 const {
@@ -16,7 +18,11 @@ const {
   getScheduleRemaining,
   parseDbTimestamp,
   formatDbDate,
+  daysBetweenDates,
+  localTodayString,
 } = financial;
+const { normalisePhone, buildReminderMessage, buildBulkReminderMessage } = reminderText;
+const { buildSealPayload } = sealText;
 
 let passed = 0;
 const check = (label, fn) => {
@@ -154,6 +160,119 @@ check('overdue predicate + days late', () => {
   assert.ok(getDaysLate('2020-01-01') > 2000);
   assert.strictEqual(getDaysLate('2099-01-01'), 0);
 });
+
+console.log('\n[6] Date buckets (aging schedule agrees with the UI pills)');
+check('daysBetweenDates is signed and calendar-accurate', () => {
+  assert.strictEqual(daysBetweenDates('2026-09-01', '2026-09-21'), 20);
+  assert.strictEqual(daysBetweenDates('2026-09-21', '2026-09-21'), 0);
+  assert.strictEqual(daysBetweenDates('2026-09-30', '2026-09-21'), -9);
+});
+check('daysBetweenDates crosses month and year boundaries', () => {
+  assert.strictEqual(daysBetweenDates('2026-08-31', '2026-09-01'), 1);
+  assert.strictEqual(daysBetweenDates('2025-12-31', '2026-01-01'), 1);
+});
+check('daysBetweenDates rejects malformed input rather than returning NaN', () => {
+  assert.strictEqual(daysBetweenDates('not-a-date', '2026-09-21'), 0);
+  assert.strictEqual(daysBetweenDates('2026-09-01', ''), 0);
+});
+check('localTodayString is zero-padded YYYY-MM-DD', () => {
+  assert.strictEqual(localTodayString(new Date(2026, 0, 5)), '2026-01-05');
+  assert.strictEqual(localTodayString(new Date(2026, 11, 31)), '2026-12-31');
+});
+
+console.log('\n[7] Reminder text (phone normalisation + message templates)');
+check('local PH numbers gain the 63 country code', () => {
+  assert.strictEqual(normalisePhone('0917 123 4567'), '639171234567');
+  assert.strictEqual(normalisePhone('9171234567'), '639171234567');
+  assert.strictEqual(normalisePhone('+63 917 123 4567'), '639171234567');
+  assert.strictEqual(normalisePhone('639171234567'), '639171234567');
+});
+check('empty phone normalises to empty (caller falls back to the share sheet)', () =>
+  assert.strictEqual(normalisePhone(''), ''));
+check('overdue message names the days late', () => {
+  const msg = buildReminderMessage({
+    borrowerName: 'Aling Nena',
+    orgName: 'Barangay Treasury',
+    amountDue: 875,
+    dueDate: '2026-09-01',
+    daysLate: 20,
+    currencySymbol: 'PHP ',
+  });
+  assert.ok(msg.includes('Aling Nena'));
+  assert.ok(msg.includes('20 days ago'));
+  assert.ok(msg.includes('875.00'));
+});
+check('due-today message does not claim lateness', () => {
+  const msg = buildReminderMessage({
+    borrowerName: 'Mang Jose',
+    orgName: 'Barangay Treasury',
+    amountDue: 1000,
+    dueDate: '2026-09-21',
+    daysLate: 0,
+    currencySymbol: 'PHP ',
+  });
+  assert.ok(msg.includes('due today'));
+  assert.ok(!msg.includes('outstanding'));
+});
+check('upcoming message quotes the due date instead of a lateness count', () => {
+  const msg = buildReminderMessage({
+    borrowerName: 'Mang Jose',
+    orgName: 'Barangay Treasury',
+    amountDue: 1000,
+    dueDate: '2026-09-25',
+    daysLate: -4,
+    currencySymbol: 'PHP ',
+  });
+  assert.ok(msg.includes('Sep 25, 2026'));
+  assert.ok(!msg.includes('due today'));
+});
+check('bulk reminder lists every borrower and totals their dues', () => {
+  const msg = buildBulkReminderMessage(
+    [
+      { borrowerName: 'Alicia', amountDue: 500, dueDate: '2026-09-01', daysLate: 20 },
+      { borrowerName: 'Ben', amountDue: 750, dueDate: '2026-09-25', daysLate: -4 },
+    ],
+    'Barangay Treasury',
+    'PHP '
+  );
+  assert.ok(msg.includes('Alicia') && msg.includes('Ben'));
+  assert.ok(msg.includes('20d overdue'));
+  assert.ok(msg.includes('1,250.00'));
+});
+
+console.log('\n[8] Seal payload (the string a published seal code is computed from)');
+const sealPayload = {
+  period: '2026-09',
+  orgName: 'Barangay Treasury',
+  chainHead: 'a'.repeat(64),
+  auditCount: 42,
+  inflowTotal: 10500,
+  outflowTotal: 2500.5,
+  outstandingTotal: 8750,
+  overdueTotal: 875,
+  activeLoans: 3,
+  borrowerCount: 3,
+};
+check('payload is stable for identical inputs', () =>
+  assert.strictEqual(buildSealPayload(sealPayload), buildSealPayload({ ...sealPayload })));
+check('money is fixed to 2 decimals so rendering cannot change the digest', () => {
+  const a = buildSealPayload({ ...sealPayload, inflowTotal: 100 });
+  const b = buildSealPayload({ ...sealPayload, inflowTotal: 100.0 });
+  assert.strictEqual(a, b);
+  assert.ok(a.includes('|100.00|'));
+});
+check('any change to a sealed figure changes the payload', () => {
+  assert.notStrictEqual(
+    buildSealPayload(sealPayload),
+    buildSealPayload({ ...sealPayload, overdueTotal: 876 })
+  );
+  assert.notStrictEqual(
+    buildSealPayload(sealPayload),
+    buildSealPayload({ ...sealPayload, chainHead: 'b'.repeat(64) })
+  );
+});
+check('payload carries its own version tag', () =>
+  assert.ok(buildSealPayload(sealPayload).startsWith('TREASURER-VAULT-SEAL-v1|')));
 
 console.log(`\n${passed} checks passed${process.exitCode ? ' (WITH FAILURES)' : ' — all good'}\n`);
 

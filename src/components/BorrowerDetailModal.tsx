@@ -10,6 +10,7 @@ import {
   Linking,
   Alert,
   Platform,
+  ActivityIndicator,
 } from 'react-native';
 import {
   X,
@@ -29,6 +30,7 @@ import {
   CreditCard,
   Share2,
   ShieldCheck,
+  FileText,
 } from 'lucide-react-native';
 import {
   Borrower,
@@ -55,6 +57,7 @@ import {
 } from '../utils/financial';
 import { parseMoney, parsePositiveMoney, parseInterestRate, parseTermCount, sanitizePhoneForUri, round2 } from '../utils/validation';
 import { isReceiptSettled, buildReceiptFromPayment, shareReceipt } from '../services/receiptService';
+import { exportLoanStatementPdf } from '../services/pdfService';
 import { format } from 'date-fns';
 
 interface BorrowerDetailModalProps {
@@ -101,6 +104,7 @@ export const BorrowerDetailModal: React.FC<BorrowerDetailModalProps> = ({
 
   // Receipt state
   const [currentReceipt, setCurrentReceipt] = useState<ReceiptData | null>(null);
+  const [pdfBusy, setPdfBusy] = useState(false);
 
   const loadBorrowerData = useCallback(async () => {
     if (!borrower) return;
@@ -230,6 +234,31 @@ export const BorrowerDetailModal: React.FC<BorrowerDetailModalProps> = ({
     setPayReference('');
     setPayNotes('');
     setViewMode('PAYMENT');
+  };
+
+  /**
+   * Builds and shares a printable statement of account for one loan.
+   *
+   * `borrower` is guaranteed here — the button only renders inside the profile.
+   */
+  const handleShareStatement = async (loanId: string) => {
+    if (!borrower) return;
+    try {
+      setPdfBusy(true);
+      await exportLoanStatementPdf({
+        borrowerId: borrower.id,
+        loanId,
+        orgName,
+        currencySymbol,
+      });
+    } catch (err) {
+      Alert.alert(
+        'Statement failed',
+        err instanceof Error ? err.message : 'Could not build the statement.'
+      );
+    } finally {
+      setPdfBusy(false);
+    }
   };
 
   const submitPayment = async (amount: number) => {
@@ -629,6 +658,23 @@ export const BorrowerDetailModal: React.FC<BorrowerDetailModalProps> = ({
                     activeOpacity={0.8}
                   >
                     <Text style={styles.generalPayBtnText}>Record Custom Amount</Text>
+                  </TouchableOpacity>
+
+                  {/* Printable statement of account for this loan */}
+                  <TouchableOpacity
+                    style={[styles.statementBtn, pdfBusy && styles.statementBtnBusy]}
+                    onPress={() => void handleShareStatement(activeLoan.id)}
+                    disabled={pdfBusy}
+                    activeOpacity={0.8}
+                  >
+                    {pdfBusy ? (
+                      <ActivityIndicator size="small" color="#0284c7" />
+                    ) : (
+                      <FileText size={16} color="#0284c7" />
+                    )}
+                    <Text style={styles.statementBtnText}>
+                      {pdfBusy ? 'Building PDF…' : 'Statement of Account (PDF)'}
+                    </Text>
                   </TouchableOpacity>
 
                   {/* Recent payments recorded against this loan */}
@@ -1492,6 +1538,27 @@ const styles = StyleSheet.create({
   generalPayBtnText: {
     fontSize: 14,
     fontWeight: '700',
+    color: '#0284c7',
+  },
+  statementBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 8,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: '#ffffff',
+    borderWidth: 1.5,
+    borderColor: '#bae6fd',
+    minHeight: 48,
+  },
+  statementBtnBusy: {
+    opacity: 0.7,
+  },
+  statementBtnText: {
+    fontSize: 13,
+    fontWeight: '800',
     color: '#0284c7',
   },
   noLoanCard: {

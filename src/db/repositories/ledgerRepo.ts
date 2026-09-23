@@ -242,5 +242,39 @@ export const ledgerRepo = {
     }
 
     return detail;
-  }
+  },
+
+  /**
+   * Expense totals grouped by category + description, for the printable report.
+   *
+   * Grouped rather than listed line-by-line because a treasurer wants "how much did we spend on
+   * snacks this month", not forty identical rows.
+   */
+  async getExpenseBreakdown(): Promise<
+    { category: TransactionCategory; description: string; total: number; entries: number }[]
+  > {
+    const db = await getDatabase();
+    const rows = await db.getAllAsync<{
+      category: TransactionCategory;
+      description: string;
+      total: number;
+      entries: number;
+    }>(
+      `SELECT
+        category,
+        COALESCE(NULLIF(TRIM(description), ''), '') as description,
+        COALESCE(SUM(amount), 0) as total,
+        COUNT(*) as entries
+      FROM ledger_transactions
+      WHERE voided_at IS NULL AND type = 'OUTFLOW'
+      GROUP BY category, description
+      ORDER BY total DESC`
+    );
+    return rows.map((r) => ({
+      category: r.category,
+      description: r.description,
+      total: round2(Number(r.total ?? 0)),
+      entries: Number(r.entries ?? 0),
+    }));
+  },
 };

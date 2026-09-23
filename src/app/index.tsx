@@ -34,6 +34,8 @@ import { BorrowerDetailModal } from '../components/BorrowerDetailModal';
 import { PaymentModal } from '../components/PaymentModal';
 import { ShareableReceiptModal } from '../components/ShareableReceiptModal';
 import { TransactionDetailModal } from '../components/TransactionDetailModal';
+import { DueSoonCard } from '../components/DueSoonCard';
+import { reportsRepo, type DueItem } from '../db/repositories/reportsRepo';
 import { ledgerRepo } from '../db/repositories/ledgerRepo';
 import { loanRepo } from '../db/repositories/loanRepo';
 import { borrowerRepo } from '../db/repositories/borrowerRepo';
@@ -101,16 +103,21 @@ export default function DashboardScreen() {
   const [receiptModalVisible, setReceiptModalVisible] = useState(false);
   const [currentReceipt, setCurrentReceipt] = useState<ReceiptData | null>(null);
 
+  // Installments due within the week (or already late) — drives the reminders card.
+  const [dueItems, setDueItems] = useState<DueItem[]>([]);
+
   const loadDashboardData = useCallback(async () => {
     try {
-      const [m, scheds, recentCollections] = await Promise.all([
+      const [m, scheds, recentCollections, dueItems] = await Promise.all([
         ledgerRepo.getMetrics(),
         loanRepo.getDueAndOverdueSchedules(),
         paymentRepo.getCollectionsThisMonth(6),
+        reportsRepo.getDueItems(7),
       ]);
       setMetrics(m);
       setSchedules(scheds);
       setCollections(recentCollections);
+      setDueItems(dueItems);
     } catch (err) {
       console.error('Failed to load dashboard data:', err);
     }
@@ -359,6 +366,14 @@ export default function DashboardScreen() {
             {formatCurrency(metrics.totalCollectedThisMonth, currencySymbol)}
           </Text>
         </View>
+
+        {/* Due & overdue with one-tap reminders */}
+        <DueSoonCard
+          items={dueItems}
+          orgName={organizationName}
+          currencySymbol={currencySymbol}
+          onOpenBorrower={handleBorrowerSelected}
+        />
 
         {/* Recent Collections Overview */}
         <View style={styles.collectionsCard}>

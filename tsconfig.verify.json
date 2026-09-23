@@ -9,5 +9,11 @@
     "esModuleInterop": true,
     "strict": true
   },
-  "include": ["src/utils/validation.ts", "src/utils/financial.ts", "src/db/types.ts"]
+  "include": [
+    "src/utils/validation.ts",
+    "src/utils/financial.ts",
+    "src/utils/reminderText.ts",
+    "src/utils/sealText.ts",
+    "src/db/types.ts"
+  ]
 }
