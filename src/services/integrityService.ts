@@ -153,13 +153,41 @@ export async function runBooksCheck(): Promise<BooksCheckResult> {
       .reduce((sum, r) => sum + Number(r.amount), 0)
   );
 
-  if (Math.abs(ledgerRepayments - paymentTotal) > 0.009) {
+  // Penalties are collected through the same payment, so they are posted as their own ledger row.
+  // Reconciling repayments alone would report a false discrepancy the moment a fine is collected.
+  const ledgerPenalties = canonicalMoney(
+    ledgerRows
+      .filter((r) => r.category === 'PENALTY')
+      .reduce((sum, r) => sum + Number(r.amount), 0)
+  );
+
+  if (Math.abs(canonicalMoney(ledgerRepayments + ledgerPenalties) - paymentTotal) > 0.009) {
     issues.push({
       kind: 'LEDGER',
       reference: 'Ledger repayments vs. payment records',
-      detail: 'The repayments posted to the ledger do not add up to the payments recorded.',
+      detail:
+        'The repayments and penalty collections posted to the ledger do not add up to the payments recorded.',
       expected: paymentTotal,
-      found: ledgerRepayments,
+      found: canonicalMoney(ledgerRepayments + ledgerPenalties),
+    });
+  }
+
+  // Penalty cash cannot exceed what was actually assessed and then collectable.
+  const chargeTotals = await db.getFirstAsync<{ charged: number; paid: number }>(
+    `SELECT
+       COALESCE(SUM(amount), 0) as charged,
+       COALESCE(SUM(paid_amount), 0) as paid
+     FROM penalty_charges
+     WHERE waived_at IS NULL`
+  );
+  const paidOnCharges = canonicalMoney(Number(chargeTotals?.paid ?? 0));
+  if (Math.abs(paidOnCharges - ledgerPenalties) > 0.009) {
+    issues.push({
+      kind: 'LEDGER',
+      reference: 'Penalties collected vs. penalty charges',
+      detail: 'Penalty cash in the ledger does not match what the penalty charges say was paid.',
+      expected: paidOnCharges,
+      found: ledgerPenalties,
     });
   }
 

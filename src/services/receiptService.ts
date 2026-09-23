@@ -160,6 +160,7 @@ export interface PaymentRecordedInput {
   nextDueAmount: number | null;
   allocations?: { installmentNumber: number; amount: number }[];
   unallocated?: number;
+  penaltyPaid?: number;
   borrowerName: string;
   borrowerPhone: string;
   orgName?: string;
@@ -183,6 +184,7 @@ export function buildReceiptFromPayment(input: PaymentRecordedInput): ReceiptDat
     nextDueAmount: input.nextDueAmount,
     allocations: input.allocations,
     unallocated: input.unallocated ?? 0,
+    penaltyPaid: input.penaltyPaid ?? 0,
     paidAt: input.payment.paidAt,
     orgName: input.orgName,
   };
@@ -213,6 +215,13 @@ export function buildReceiptText(
         .map((a) => `   • Installment #${a.installmentNumber}: ${formatCurrency(a.amount, currencySymbol)}`)
         .join('\n')}`
     : '';
+
+  // Penalty money is called out separately: the borrower must be able to see that part of what
+  // they handed over cleared a fine rather than reducing the loan.
+  const penaltyLine =
+    (receipt.penaltyPaid ?? 0) > 0
+      ? `\n⚠️ *Of which penalties:* ${formatCurrency(receipt.penaltyPaid ?? 0, currencySymbol)}`
+      : '';
   const verificationLines = verification
     ? `\n${DIVIDER}\n🔒 *Verification Code:* ${verification.code}\n🔒 Token: ${verification.token}\n   (tap Verify in the Treasurer app to check this receipt)`
     : '';
@@ -223,7 +232,7 @@ export function buildReceiptText(
 ${DIVIDER}
 👤 *Borrower:* ${receipt.borrowerName}
 📅 *Date:* ${formatDbDateTime(receipt.paidAt, 'PPpp')}
-💵 *Amount Paid:* ${formatCurrency(receipt.amountPaid, currencySymbol)}
+💵 *Amount Paid:* ${formatCurrency(receipt.amountPaid, currencySymbol)}${penaltyLine}
 💳 *Payment Method:* ${receipt.paymentMethod}${receipt.referenceNo ? ` (Ref: ${receipt.referenceNo})` : ''}${applied}
 ${DIVIDER}
 ⚖️ *Remaining Balance:* ${formatCurrency(receipt.remainingBalance, currencySymbol)}

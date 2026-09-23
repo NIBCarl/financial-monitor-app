@@ -38,23 +38,6 @@ export function fromCents(cents: number): number {
 }
 
 /**
- * Reads a stored value as centavos.
- *
- * Tolerates a legacy row that was written before the centavo migration (schema < 4) by rounding
- * it — such a row holds pesos, so callers must convert old backups through
- * `legacyPesosToCents` instead of relying on this.
- */
-export function storedToCents(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  return roundHalfAwayFromZero(value);
-}
-
-/** Converts a pre-centavo (peso-denominated) stored value into centavos. */
-export function legacyPesosToCents(value: number): number {
-  return toCents(value);
-}
-
-/**
  * Adds up **peso** amounts and returns the exact total in centavos.
  *
  * Named for what it takes and what it returns, because the alternative (`sumCents` taking pesos)

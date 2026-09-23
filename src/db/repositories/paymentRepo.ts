@@ -8,7 +8,9 @@ import {
   rebuildScheduleStates,
 } from '../../utils/financial';
 import { canonicalMoney } from '../../utils/money';
+import { splitPaymentAcrossCharges } from '../../utils/penalties';
 import { auditRepo } from './auditRepo';
+import { penaltyRepo } from './penaltyRepo';
 
 /** Money comparisons tolerate half a cent so 2-decimal rounding can never block a full settlement. */
 const MONEY_EPSILON = 0.004;
@@ -35,6 +37,8 @@ export interface RecordPaymentResult {
   allocations: { installmentNumber: number; amount: number }[];
   /** Cash that could not be applied to any installment (legacy drifted data only). */
   unallocated: number;
+  /** Of the payment, how much went to assessed penalties rather than installments. */
+  penaltyPaid: number;
 }
 
 const SCHEDULE_COLUMNS = `
@@ -82,12 +86,21 @@ export const paymentRepo = {
       }
 
       const outstanding = canonicalMoney(loan.remaining_balance);
-      if (outstanding <= MONEY_EPSILON) {
+
+      // Assessed penalties are collectable alongside the balance, so the ceiling is both together.
+      const openCharges = await penaltyRepo.getOpenChargesForLoanWith(txn, input.loanId);
+      const openPenaltyTotal = canonicalMoney(
+        openCharges.reduce((sum, charge) => sum + Math.max(0, charge.amount - charge.paidAmount), 0)
+      );
+
+      if (outstanding <= MONEY_EPSILON && openPenaltyTotal <= MONEY_EPSILON) {
         throw new Error('This loan has no outstanding balance.');
       }
-      if (amount > outstanding + MONEY_EPSILON) {
+
+      const collectable = canonicalMoney(outstanding + openPenaltyTotal);
+      if (amount > collectable + MONEY_EPSILON) {
         throw new Error(
-          `Payment cannot exceed the outstanding balance of ${outstanding.toFixed(2)}. Please enter a smaller amount.`
+          `Payment cannot exceed ${collectable.toFixed(2)} (balance plus outstanding penalties). Please enter a smaller amount.`
         );
       }
 
@@ -127,7 +140,25 @@ export const paymentRepo = {
         );
       }
 
-      const remainingAfterPayment = canonicalMoney(outstanding - amount);
+      // Any cash left after the installments goes to assessed penalties, oldest first, before it
+      // can be treated as unapplied credit — otherwise a treasurer collecting "balance + fine"
+      // would see the fine money sitting as a credit while the penalty stayed open. The allocation
+      // itself is a pure function so the harness can prove the centavos add up.
+      const penaltySplit = splitPaymentAcrossCharges(
+        unallocated,
+        openCharges.map((charge) => ({
+          id: charge.id,
+          amount: charge.amount,
+          paidAmount: charge.paidAmount,
+        }))
+      );
+      const penaltyApplied = penaltySplit.penaltyApplied;
+
+      for (const update of penaltySplit.updates) {
+        await penaltyRepo.applyPaymentWith(txn, update.id, update.newPaidAmount);
+      }
+
+      const remainingAfterPayment = canonicalMoney(outstanding - (amount - penaltyApplied));
       const settled = remainingAfterPayment <= MONEY_EPSILON;
       const persistedBalance = settled ? 0 : remainingAfterPayment;
 
@@ -137,19 +168,40 @@ export const paymentRepo = {
         input.loanId,
       ]);
 
+      const leftoverCredit = penaltySplit.leftover;
       const unappliedNote =
-        unallocated > 0 ? ` — ${unallocated.toFixed(2)} held as unapplied credit` : '';
-      await txn.runAsync(
-        `INSERT INTO ledger_transactions (
-          id, type, category, amount, description, related_loan_id, transaction_date
-        ) VALUES (?, 'INFLOW', 'LOAN_REPAYMENT', ?, ?, ?, datetime('now'))`,
-        [
-          'tx_pay_' + paymentId,
-          amount,
-          `Loan repayment received (${input.paymentMethod})${unappliedNote}`,
-          input.loanId,
-        ]
-      );
+        leftoverCredit > 0 ? ` — ${leftoverCredit.toFixed(2)} held as unapplied credit` : '';
+
+      // The ledger is split so the cash reconciles: installment money under LOAN_REPAYMENT and
+      // penalty money under PENALTY. A single row would mislabel one of them.
+      const repaymentPortion = canonicalMoney(amount - penaltyApplied);
+      if (repaymentPortion > MONEY_EPSILON || penaltyApplied <= MONEY_EPSILON) {
+        await txn.runAsync(
+          `INSERT INTO ledger_transactions (
+            id, type, category, amount, description, related_loan_id, transaction_date
+          ) VALUES (?, 'INFLOW', 'LOAN_REPAYMENT', ?, ?, ?, datetime('now'))`,
+          [
+            'tx_pay_' + paymentId,
+            repaymentPortion,
+            `Loan repayment received (${input.paymentMethod})${unappliedNote}`,
+            input.loanId,
+          ]
+        );
+      }
+
+      if (penaltyApplied > MONEY_EPSILON) {
+        await txn.runAsync(
+          `INSERT INTO ledger_transactions (
+            id, type, category, amount, description, related_loan_id, transaction_date
+          ) VALUES (?, 'INFLOW', 'PENALTY', ?, ?, ?, datetime('now'))`,
+          [
+            'tx_pen_' + paymentId,
+            penaltyApplied,
+            `Penalty collected with payment (${input.paymentMethod})`,
+            input.loanId,
+          ]
+        );
+      }
 
       const stored = await txn.getFirstAsync<{ paid_at: string }>(
         `SELECT paid_at FROM loan_payments WHERE id = ?`,
@@ -172,6 +224,7 @@ export const paymentRepo = {
           paymentMethod: input.paymentMethod,
           paidAt: paidAtValue,
           remainingBalance: persistedBalance,
+          penaltyPaid: penaltyApplied,
         },
       });
 
@@ -196,7 +249,8 @@ export const paymentRepo = {
           installmentNumber: a.installmentNumber,
           amount: a.appliedAmount,
         })),
-        unallocated,
+        unallocated: leftoverCredit,
+        penaltyPaid: penaltyApplied,
       };
     });
 

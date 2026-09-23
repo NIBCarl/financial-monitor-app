@@ -13,7 +13,7 @@ import { Platform } from 'react-native';
  * without touching their data.
  */
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /** Subset of the database API a migration may use (a Transaction satisfies this too). */
 type SqlRunner = Pick<SQLite.SQLiteDatabase, 'execAsync' | 'runAsync' | 'getFirstAsync' | 'getAllAsync'>;
@@ -219,6 +219,68 @@ const MIGRATIONS: Migration[] = [
         );
 
         CREATE INDEX IF NOT EXISTS idx_seals_period ON ledger_seals(period, created_at);
+      `);
+    },
+  },
+  {
+    version: 4,
+    name: 'configurable_penalties',
+    /**
+     * Penalties the treasury configures rather than the app inventing.
+     *
+     * `penalty_rules` is the policy ("2% per week after 3 days grace, on this loan"); a rule can be
+     * scoped to one loan or to one borrower. `penalty_charges` is a policy *applied* — a concrete
+     * amount attached to one overdue installment, written only when the treasurer assesses it, so
+     * money never appears on a borrower's account as a surprise.
+     *
+     * Both tables are append-only in spirit: nothing is deleted, charges are waived (with a reason,
+     * audited) and rules are superseded by adding a new one.
+     */
+    up: async (db) => {
+      await db.execAsync(`
+        CREATE TABLE IF NOT EXISTS penalty_rules (
+          id TEXT PRIMARY KEY NOT NULL,
+          scope TEXT NOT NULL,
+          borrower_id TEXT NOT NULL,
+          loan_id TEXT,
+          basis TEXT NOT NULL,
+          amount REAL NOT NULL,
+          period TEXT NOT NULL,
+          grace_days INTEGER NOT NULL DEFAULT 0,
+          cap_amount REAL,
+          reason TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          waived_at TEXT,
+          waived_reason TEXT,
+          FOREIGN KEY (borrower_id) REFERENCES borrowers(id) ON DELETE CASCADE,
+          FOREIGN KEY (loan_id) REFERENCES loans(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_penalty_rules_borrower ON penalty_rules(borrower_id, waived_at);
+        CREATE INDEX IF NOT EXISTS idx_penalty_rules_loan ON penalty_rules(loan_id);
+
+        CREATE TABLE IF NOT EXISTS penalty_charges (
+          id TEXT PRIMARY KEY NOT NULL,
+          rule_id TEXT NOT NULL,
+          loan_id TEXT NOT NULL,
+          borrower_id TEXT NOT NULL,
+          schedule_id TEXT,
+          installment_number INTEGER,
+          amount REAL NOT NULL,
+          days_late INTEGER NOT NULL DEFAULT 0,
+          periods INTEGER NOT NULL DEFAULT 0,
+          paid_amount REAL NOT NULL DEFAULT 0,
+          waived_at TEXT,
+          waived_reason TEXT,
+          assessed_at TEXT NOT NULL DEFAULT (datetime('now')),
+          FOREIGN KEY (loan_id) REFERENCES loans(id) ON DELETE CASCADE,
+          FOREIGN KEY (borrower_id) REFERENCES borrowers(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_penalty_charges_loan ON penalty_charges(loan_id, waived_at);
+        CREATE INDEX IF NOT EXISTS idx_penalty_charges_borrower ON penalty_charges(borrower_id, waived_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_penalty_charges_unique
+          ON penalty_charges(rule_id, schedule_id) WHERE schedule_id IS NOT NULL;
       `);
     },
   },

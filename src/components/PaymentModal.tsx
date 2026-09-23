@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Modal,
   View,
@@ -13,6 +13,7 @@ import {
 import { X, DollarSign, CreditCard, Tag } from 'lucide-react-native';
 import { Loan, LoanSchedule, PaymentMethod, ReceiptData } from '../db/types';
 import { paymentRepo } from '../db/repositories/paymentRepo';
+import { penaltyRepo } from '../db/repositories/penaltyRepo';
 import { formatCurrency, getScheduleRemaining } from '../utils/financial';
 import { parsePositiveMoney, round2 } from '../utils/validation';
 import { buildReceiptFromPayment } from '../services/receiptService';
@@ -56,6 +57,41 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const installmentDue = schedule ? getScheduleRemaining(schedule) : outstandingBalance;
   const amountStr = amountOverride ?? (installmentDue > 0 ? installmentDue.toFixed(2) : '');
 
+  // Assessed penalties are collectable in the same visit, so the ceiling is balance + penalties.
+  const [openPenaltyTotal, setOpenPenaltyTotal] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    // Everything inside the async closure: the modal must never set state synchronously in an effect.
+    void (async () => {
+      await Promise.resolve();
+      if (cancelled) return;
+
+      if (!visible || !loan) {
+        setOpenPenaltyTotal(0);
+        return;
+      }
+
+      try {
+        const charges = await penaltyRepo.getOpenChargesForLoan(loan.id);
+        if (cancelled) return;
+        setOpenPenaltyTotal(
+          round2(charges.reduce((sum, c) => sum + Math.max(0, c.amount - c.paidAmount), 0))
+        );
+      } catch {
+        // A missing penalty table (pre-migration database) must not block taking a normal payment.
+        if (!cancelled) setOpenPenaltyTotal(0);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, loan]);
+
+  const collectableTotal = round2(outstandingBalance + openPenaltyTotal);
+
   const paymentMethods: { label: string; value: PaymentMethod }[] = [
     { label: 'Cash', value: 'CASH' },
     { label: 'GCash / Maya', value: 'GCASH' },
@@ -86,6 +122,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           nextDueAmount: result.nextDueAmount,
           allocations: result.allocations,
           unallocated: result.unallocated,
+          penaltyPaid: result.penaltyPaid,
           borrowerName,
           borrowerPhone,
           orgName,
@@ -107,10 +144,12 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       return;
     }
 
-    if (outstandingBalance > MONEY_EPSILON && parsed.value > outstandingBalance + MONEY_EPSILON) {
+    if (outstandingBalance > MONEY_EPSILON && parsed.value > collectableTotal + MONEY_EPSILON) {
       Alert.alert(
         'Amount Exceeds Balance',
-        `Only ${formatCurrency(outstandingBalance, currencySymbol)} is still outstanding on this loan. Enter that amount or less.`
+        openPenaltyTotal > 0
+          ? `This loan owes ${formatCurrency(outstandingBalance, currencySymbol)} in installments plus ${formatCurrency(openPenaltyTotal, currencySymbol)} in penalties — ${formatCurrency(collectableTotal, currencySymbol)} in total. Enter that amount or less.`
+          : `Only ${formatCurrency(outstandingBalance, currencySymbol)} is still outstanding on this loan. Enter that amount or less.`
       );
       return;
     }
@@ -181,6 +220,15 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   ) : null}
                 </Text>
               </View>
+
+              {openPenaltyTotal > 0 ? (
+                <View style={styles.penaltyHint}>
+                  <Text style={styles.penaltyHintText}>
+                    Penalties assessed: <Text style={{ fontWeight: '800' }}>{formatCurrency(openPenaltyTotal, currencySymbol)}</Text> — anything you enter above the balance clears these first. Total collectable:{' '}
+                    <Text style={{ fontWeight: '800' }}>{formatCurrency(collectableTotal, currencySymbol)}</Text>.
+                  </Text>
+                </View>
+              ) : null}
             </View>
 
             {/* Payment Method */}
@@ -352,6 +400,19 @@ const styles = StyleSheet.create({
   infoHintText: {
     fontSize: 12,
     color: '#64748b',
+  },
+  penaltyHint: {
+    marginTop: 8,
+    padding: 10,
+    borderRadius: 8,
+    backgroundColor: '#fef3c7',
+    borderWidth: 1,
+    borderColor: '#fcd34d',
+  },
+  penaltyHintText: {
+    fontSize: 12,
+    color: '#78350f',
+    lineHeight: 17,
   },
   methodGrid: {
     flexDirection: 'row',

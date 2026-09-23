@@ -7,6 +7,7 @@ const financial = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'fi
 const reminderText = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'reminderText.js'));
 const sealText = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'sealText.js'));
 const money = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'money.js'));
+const penalties = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'penalties.js'));
 
 const { parseMoney, parsePositiveMoney, parseTermCount, parseInterestRate, round2, sanitizePhoneForUri, csvCell, csvRow, MAX_MONEY } = validation;
 const {
@@ -33,6 +34,7 @@ const {
   canonicalMoney,
   roundHalfAwayFromZero,
 } = money;
+const { computePenalty, describePenaltyRule } = penalties;
 
 let passed = 0;
 const check = (label, fn) => {
@@ -366,6 +368,107 @@ check('no money is created or destroyed by a schedule', () => {
   const scheduleCents = sumPesosToCents(result.installments.map((i) => i.expectedAmount));
   assert.strictEqual(scheduleCents, toCents(result.totalPayable));
   assert.strictEqual(result.installments.length, 7);
+});
+
+console.log('\n[11] Penalty rules (scope / amount-or-percent / day-week-month)');
+const daily = { basis: 'FLAT', amount: 20, period: 'DAY', graceDays: 0 };
+const weekly2pct = { basis: 'PERCENT', amount: 2, period: 'WEEK', graceDays: 3 };
+check('a flat daily penalty multiplies by the days late', () => {
+  const r = computePenalty(daily, 2625, 5);
+  assert.strictEqual(r.periods, 5);
+  assert.strictEqual(r.amount, 100);
+});
+check('grace days are subtracted before anything is charged', () => {
+  assert.strictEqual(computePenalty(weekly2pct, 2625, 3).amount, 0); // still inside grace
+  assert.strictEqual(computePenalty(weekly2pct, 2625, 3).periods, 0);
+});
+check('a weekly percentage charges whole weeks only', () => {
+  const r = computePenalty(weekly2pct, 2625, 17); // 17 - 3 grace = 14 days = 2 whole weeks
+  assert.strictEqual(r.periods, 2);
+  assert.strictEqual(r.chargeableDays, 14);
+  assert.strictEqual(r.amount, 105); // 2% x 2 periods of 2,625 = 105.00
+});
+check('day 10 of a fortnight is still only one week charged', () => {
+  assert.strictEqual(computePenalty(weekly2pct, 2625, 10).periods, 1);
+  assert.strictEqual(computePenalty(weekly2pct, 2625, 9).periods, 0); // 9-3=6 days < 1 week
+});
+check('a monthly percentage uses whole 30-day months', () => {
+  const monthly = { basis: 'PERCENT', amount: 5, period: 'MONTH', graceDays: 0 };
+  assert.strictEqual(computePenalty(monthly, 10000, 29).periods, 0);
+  assert.strictEqual(computePenalty(monthly, 10000, 30).periods, 1);
+  assert.strictEqual(computePenalty(monthly, 10000, 30).amount, 500);
+  assert.strictEqual(computePenalty(monthly, 10000, 61).periods, 2);
+});
+check('the cap limits a single installment, not the periods', () => {
+  const capped = { basis: 'FLAT', amount: 50, period: 'DAY', graceDays: 0, capAmount: 200 };
+  const r = computePenalty(capped, 2625, 9); // 9 x 50 = 450, capped at 200
+  assert.strictEqual(r.periods, 9);
+  assert.strictEqual(r.amount, 200);
+});
+check('a penalty is never charged on a not-yet-late installment', () =>
+  assert.strictEqual(computePenalty(daily, 2625, 0).amount, 0));
+check('penalty arithmetic stays centavo-exact', () => {
+  // 1.5% per week of 1,000.01 for 3 weeks = 45.00 (4,500.045 cents -> half away from zero)
+  const r = computePenalty({ basis: 'PERCENT', amount: 1.5, period: 'WEEK', graceDays: 0 }, 1000.01, 21);
+  assert.strictEqual(r.periods, 3);
+  assert.strictEqual(r.amount, 45);
+});
+check('the rule is described in words the treasurer can check', () => {
+  assert.strictEqual(
+    describePenaltyRule(weekly2pct, 'PHP '),
+    '2% of the installment per week after 3 days grace'
+  );
+  assert.strictEqual(
+    describePenaltyRule({ basis: 'FLAT', amount: 25, period: 'DAY', graceDays: 1, capAmount: 500 }, 'PHP '),
+    'PHP 25.00 per day after 1 day grace (cap PHP 500.00)'
+  );
+});
+
+check('payments clear penalties oldest first and leave the rest as credit', () => {
+  const split = penalties.splitPaymentAcrossCharges(300, [
+    { id: 'c1', amount: 100, paidAmount: 0 },
+    { id: 'c2', amount: 250, paidAmount: 50 },
+  ]);
+  assert.strictEqual(split.penaltyApplied, 300);
+  assert.strictEqual(split.leftover, 0);
+  assert.deepStrictEqual(split.updates, [
+    { id: 'c1', newPaidAmount: 100 },
+    { id: 'c2', newPaidAmount: 250 },
+  ]);
+});
+
+check('a payment smaller than a fine part-pays it and stops', () => {
+  const split = penalties.splitPaymentAcrossCharges(40.25, [
+    { id: 'c1', amount: 100, paidAmount: 0 },
+    { id: 'c2', amount: 500, paidAmount: 0 },
+  ]);
+  assert.strictEqual(split.penaltyApplied, 40.25);
+  assert.strictEqual(split.leftover, 0);
+  assert.deepStrictEqual(split.updates, [{ id: 'c1', newPaidAmount: 40.25 }]);
+});
+
+check('what the fines cannot absorb is left over, centavo-exact', () => {
+  const split = penalties.splitPaymentAcrossCharges(0.05, [{ id: 'c1', amount: 0.03, paidAmount: 0 }]);
+  assert.strictEqual(split.penaltyApplied, 0.03);
+  assert.strictEqual(split.leftover, 0.02);
+  assert.strictEqual(split.updates[0].newPaidAmount, 0.03);
+});
+
+check('already-settled or waived-out fines are skipped, not paid twice', () => {
+  const split = penalties.splitPaymentAcrossCharges(100, [
+    { id: 'paid', amount: 50, paidAmount: 50 },
+    { id: 'overpaid', amount: 50, paidAmount: 80 },
+    { id: 'open', amount: 30, paidAmount: 0 },
+  ]);
+  assert.strictEqual(split.penaltyApplied, 30);
+  assert.strictEqual(split.leftover, 70);
+  assert.deepStrictEqual(split.updates, [{ id: 'open', newPaidAmount: 30 }]);
+});
+
+check('no leftover cash means no penalty allocation at all', () => {
+  const split = penalties.splitPaymentAcrossCharges(0, [{ id: 'c1', amount: 100, paidAmount: 0 }]);
+  assert.strictEqual(split.penaltyApplied, 0);
+  assert.strictEqual(split.updates.length, 0);
 });
 
 console.log(`\n${passed} checks passed${process.exitCode ? ' (WITH FAILURES)' : ' — all good'}\n`);

@@ -16,6 +16,7 @@ export type TransactionCategory =
   | 'MEMBERSHIP_DUES'
   | 'DONATION'
   | 'EXPENSE'
+  | 'PENALTY'
   | 'OTHER';
 
 export interface Borrower {
@@ -63,9 +64,64 @@ export interface LoanSchedule {
   settledDate?: string | null;
 }
 
-export type AuditEntity = 'loan_payment' | 'ledger_transaction' | 'loan' | 'borrower' | 'settings';
+export type AuditEntity = 'loan_payment' | 'ledger_transaction' | 'loan' | 'borrower' | 'settings' | 'penalty_rule' | 'penalty_charge';
 
-export type AuditAction = 'CREATE' | 'UPDATE' | 'VOID';
+export type AuditAction = 'CREATE' | 'UPDATE' | 'VOID' | 'WAIVE';
+
+/**
+ * A penalty policy the treasury writes down once and the app applies.
+ *
+ * Two scopes, because both are real requests: a rule attached to **one loan** ("this debt carries
+ * a 2% weekly penalty") or to **one borrower** ("this member is on a stricter arrangement").
+ * A borrower-scoped rule applies to every loan that borrower has.
+ */
+export type PenaltyScope = 'LOAN' | 'BORROWER';
+
+/** Fixed peso amount, or a percentage of the overdue installment. */
+export type PenaltyBasis = 'FLAT' | 'PERCENT';
+
+/** How often the penalty is charged while the installment stays unpaid. */
+export type PenaltyPeriod = 'DAY' | 'WEEK' | 'MONTH';
+
+export interface PenaltyRule {
+  id: string;
+  scope: PenaltyScope;
+  borrowerId: string;
+  /** Set when `scope` is `LOAN`; null for borrower-wide rules. */
+  loanId?: string | null;
+  basis: PenaltyBasis;
+  /** Pesos when `basis` is FLAT, percent (e.g. 2 means 2%) when PERCENT. */
+  amount: number;
+  period: PenaltyPeriod;
+  /** Days of grace after the due date before any penalty accrues. */
+  graceDays: number;
+  /** Optional ceiling in pesos for a single installment's penalty. */
+  capAmount?: number | null;
+  reason?: string | null;
+  createdAt: string;
+  waivedAt?: string | null;
+  waivedReason?: string | null;
+}
+
+/** One assessed penalty, tied to the installment it came from. */
+export interface PenaltyCharge {
+  id: string;
+  ruleId: string;
+  loanId: string;
+  borrowerId: string;
+  scheduleId?: string | null;
+  installmentNumber?: number | null;
+  /** Charged amount in pesos. */
+  amount: number;
+  daysLate: number;
+  /** How many whole periods (days/weeks/months) were charged. */
+  periods: number;
+  paidAmount: number;
+  waivedAt?: string | null;
+  waivedReason?: string | null;
+  assessedAt: string;
+}
+
 
 /** One append-only entry in the audit trail. Nothing in the app ever deletes these. */
 export interface AuditLogEntry {
@@ -171,6 +227,8 @@ export interface ReceiptData {
   nextDueAmount?: number | null;
   allocations?: { installmentNumber: number; amount: number }[];
   unallocated?: number;
+  /** Part of this payment that settled assessed penalties instead of installments, if any. */
+  penaltyPaid?: number;
   paidAt: string;
   orgName?: string;
 }

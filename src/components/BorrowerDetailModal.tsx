@@ -41,10 +41,18 @@ import {
   RepaymentFrequency,
   PaymentMethod,
   ReceiptData,
+  PenaltyCharge,
+  PenaltyRule,
 } from '../db/types';
 import { loanRepo } from '../db/repositories/loanRepo';
 import { paymentRepo } from '../db/repositories/paymentRepo';
 import { borrowerRepo } from '../db/repositories/borrowerRepo';
+import { penaltyRepo } from '../db/repositories/penaltyRepo';
+import { assessPenalties, previewAssessment, waiveCharge } from '../services/penaltyService';
+import { describePenaltyRule } from '../utils/penalties';
+import { canonicalMoney } from '../utils/money';
+import { ConfirmReasonModal } from './ConfirmReasonModal';
+import { PenaltyRulesModal } from './PenaltyRulesModal';
 import {
   calculateAmortization,
   formatCurrency,
@@ -106,6 +114,33 @@ export const BorrowerDetailModal: React.FC<BorrowerDetailModalProps> = ({
   const [currentReceipt, setCurrentReceipt] = useState<ReceiptData | null>(null);
   const [pdfBusy, setPdfBusy] = useState(false);
 
+  // Penalty state: rules describe the arrangement, charges are what is actually owed.
+  const [penaltyRules, setPenaltyRules] = useState<PenaltyRule[]>([]);
+  const [penaltyCharges, setPenaltyCharges] = useState<PenaltyCharge[]>([]);
+  const [rulesModalVisible, setRulesModalVisible] = useState(false);
+  const [assessing, setAssessing] = useState(false);
+  const [waiveChargeTarget, setWaiveChargeTarget] = useState<PenaltyCharge | null>(null);
+
+  const openPenaltyTotal = useMemo(
+    () =>
+      canonicalMoney(
+        penaltyCharges
+          .filter((charge) => !charge.waivedAt)
+          .reduce((sum, charge) => sum + Math.max(0, charge.amount - charge.paidAmount), 0)
+      ),
+    [penaltyCharges]
+  );
+
+  const activePenaltyRules = useMemo(
+    () => penaltyRules.filter((rule) => !rule.waivedAt),
+    [penaltyRules]
+  );
+
+  const openPenaltyCharges = useMemo(
+    () => penaltyCharges.filter((charge) => !charge.waivedAt && charge.amount - charge.paidAmount > 0),
+    [penaltyCharges]
+  );
+
   const loadBorrowerData = useCallback(async () => {
     if (!borrower) return;
     try {
@@ -136,6 +171,21 @@ export const BorrowerDetailModal: React.FC<BorrowerDetailModalProps> = ({
 
       setSchedulesMap(schedMap);
       setPaymentsMap(payMap);
+
+      // Penalties load alongside the rest; a database that predates migration v4 must not break
+      // the profile, so a failure here simply leaves the penalty section empty.
+      try {
+        const [rules, charges] = await Promise.all([
+          penaltyRepo.getAllRulesForBorrower(borrower.id),
+          penaltyRepo.getAllChargesForBorrower(borrower.id),
+        ]);
+        setPenaltyRules(rules);
+        setPenaltyCharges(charges);
+      } catch (penaltyErr) {
+        console.warn('Penalty data unavailable:', penaltyErr);
+        setPenaltyRules([]);
+        setPenaltyCharges([]);
+      }
     } catch (err) {
       console.error('Failed to load borrower data:', err);
     } finally {
@@ -259,6 +309,88 @@ export const BorrowerDetailModal: React.FC<BorrowerDetailModalProps> = ({
     } finally {
       setPdfBusy(false);
     }
+  };
+
+  const handleAssessPenalties = async () => {
+    if (!borrower) return;
+    try {
+      setAssessing(true);
+
+      // Preview first — the treasurer sees the exact total before anything is written.
+      const preview = await previewAssessment(borrower.id);
+
+      if (preview.lines.length === 0) {
+        Alert.alert(
+          'Nothing to Assess',
+          activePenaltyRules.length === 0
+            ? 'This borrower has no penalty rules, so no penalty can be charged. Add a rule first.'
+            : 'Every overdue installment is already charged up to date. Nothing to add.'
+        );
+        return;
+      }
+
+      const lines = preview.lines
+        .slice(0, 8)
+        .map(
+          (line) =>
+            `• Installment #${line.installmentNumber}: ${line.daysLate} day${line.daysLate === 1 ? '' : 's'} late → ${formatCurrency(line.amount, currencySymbol)}${line.isRaise ? ` (up from ${formatCurrency(line.previousAmount, currencySymbol)})` : ''}`
+        )
+        .join('\n');
+      const more =
+        preview.lines.length > 8 ? `\n…and ${preview.lines.length - 8} more installment(s).` : '';
+
+      Alert.alert(
+        'Assess Penalties?',
+        `${lines}${more}\n\nNewly recorded: ${formatCurrency(preview.totalNewAmount, currencySymbol)}\nTotal penalties on the account: ${formatCurrency(preview.totalAfter, currencySymbol)}`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Assess',
+            onPress: () => {
+              void (async () => {
+                try {
+                  const result = await assessPenalties(borrower.id);
+                  await loadBorrowerData();
+                  onDataChanged();
+                  const chargedCount = result.created + result.raised;
+                  Alert.alert(
+                    'Penalties Assessed',
+                    chargedCount === 0
+                      ? 'Nothing new was recorded.'
+                      : `${formatCurrency(result.totalAmount, currencySymbol)} recorded across ${chargedCount} installment${chargedCount === 1 ? '' : 's'} (${result.created} new, ${result.raised} increased).`
+                  );
+                } catch (err) {
+                  Alert.alert(
+                    'Assessment Failed',
+                    err instanceof Error ? err.message : 'Could not assess penalties.'
+                  );
+                }
+              })();
+            },
+          },
+        ]
+      );
+    } catch (err) {
+      Alert.alert('Error', err instanceof Error ? err.message : 'Could not preview penalties.');
+    } finally {
+      setAssessing(false);
+    }
+  };
+
+  const handleWaiveCharge = (charge: PenaltyCharge) => {
+    const outstanding = canonicalMoney(charge.amount - charge.paidAmount);
+    Alert.alert(
+      'Waive this penalty?',
+      `${formatCurrency(outstanding, currencySymbol)} on installment #${charge.installmentNumber ?? '—'} will be forgiven and will no longer be collected. The waiver is recorded in the audit log.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Continue',
+          style: 'destructive',
+          onPress: () => setWaiveChargeTarget(charge),
+        },
+      ]
+    );
   };
 
   const submitPayment = async (amount: number) => {
@@ -525,6 +657,99 @@ export const BorrowerDetailModal: React.FC<BorrowerDetailModalProps> = ({
                   ) : null}
                 </View>
               )}
+
+              {/* Penalties — rules and what has actually been assessed */}
+              <View style={styles.penaltyCard}>
+                <View style={styles.penaltyHeader}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.penaltyTitle}>Penalties</Text>
+                    <Text style={styles.penaltySubtitle}>
+                      {activePenaltyRules.length === 0
+                        ? 'No rules — this borrower cannot be penalised'
+                        : `${activePenaltyRules.length} active rule${activePenaltyRules.length === 1 ? '' : 's'}`}
+                    </Text>
+                  </View>
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text style={styles.penaltyAmountLabel}>Outstanding</Text>
+                    <Text
+                      style={[styles.penaltyAmount, openPenaltyTotal > 0 && styles.penaltyAmountDue]}
+                    >
+                      {formatCurrency(openPenaltyTotal, currencySymbol)}
+                    </Text>
+                  </View>
+                </View>
+
+                {activePenaltyRules.slice(0, 3).map((rule) => (
+                  <Text key={rule.id} style={styles.penaltyRuleLine}>
+                    • {describePenaltyRule(rule, currencySymbol)}
+                    {rule.scope === 'LOAN' ? ' (one loan)' : ' (whole account)'}
+                  </Text>
+                ))}
+                {activePenaltyRules.length > 3 ? (
+                  <Text style={styles.penaltyRuleLine}>
+                    …and {activePenaltyRules.length - 3} more rule(s).
+                  </Text>
+                ) : null}
+
+                {openPenaltyCharges.slice(0, 5).map((charge) => (
+                  <View key={charge.id} style={styles.penaltyChargeRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.penaltyChargeText}>
+                        Installment #{charge.installmentNumber ?? '—'} •{' '}
+                        {formatCurrency(canonicalMoney(charge.amount - charge.paidAmount), currencySymbol)}
+                        {charge.paidAmount > 0
+                          ? ` (partly paid: ${formatCurrency(charge.paidAmount, currencySymbol)})`
+                          : ''}
+                      </Text>
+                      <Text style={styles.penaltyChargeMeta}>
+                        {charge.daysLate} day{charge.daysLate === 1 ? '' : 's'} late
+                        {charge.assessedAt
+                          ? ` • assessed ${formatDatePretty(charge.assessedAt.slice(0, 10))}`
+                          : ''}
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      onPress={() => handleWaiveCharge(charge)}
+                      style={styles.penaltyWaiveBtn}
+                      accessibilityLabel="Waive this penalty"
+                    >
+                      <Text style={styles.penaltyWaiveText}>Waive</Text>
+                    </TouchableOpacity>
+                  </View>
+                ))}
+                {openPenaltyCharges.length > 5 ? (
+                  <Text style={styles.penaltyChargeMeta}>
+                    …and {openPenaltyCharges.length - 5} more assessed penalty(ies).
+                  </Text>
+                ) : null}
+
+                <View style={styles.penaltyActions}>
+                  <TouchableOpacity
+                    style={[styles.penaltyActionBtn, assessing && { opacity: 0.6 }]}
+                    onPress={() => void handleAssessPenalties()}
+                    disabled={assessing}
+                  >
+                    {assessing ? (
+                      <ActivityIndicator size="small" color="#ffffff" />
+                    ) : (
+                      <AlertCircle size={14} color="#ffffff" />
+                    )}
+                    <Text style={styles.penaltyActionBtnText}>Assess now</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.penaltySecondaryBtn}
+                    onPress={() => setRulesModalVisible(true)}
+                  >
+                    <Tag size={14} color="#0369a1" />
+                    <Text style={styles.penaltySecondaryBtnText}>Manage rules</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={styles.penaltyFootnote}>
+                  Assessing adds penalties for installments that are late under your rules. Nothing is
+                  ever charged automatically.
+                </Text>
+              </View>
 
               {/* Active Loan Status Card */}
               {activeLoan ? (
@@ -1142,11 +1367,164 @@ export const BorrowerDetailModal: React.FC<BorrowerDetailModalProps> = ({
           )}
         </View>
       </View>
+
+      <PenaltyRulesModal
+        visible={rulesModalVisible}
+        borrowerId={borrower.id}
+        borrowerName={borrower.fullName}
+        loans={loans}
+        currencySymbol={currencySymbol}
+        onClose={() => setRulesModalVisible(false)}
+        onChanged={() => {
+          void loadBorrowerData();
+          onDataChanged();
+        }}
+      />
+
+      <ConfirmReasonModal
+        visible={waiveChargeTarget !== null}
+        title="Waive this penalty?"
+        message={
+          waiveChargeTarget
+            ? `${formatCurrency(canonicalMoney(waiveChargeTarget.amount - waiveChargeTarget.paidAmount), currencySymbol)} will be forgiven. The waiver is permanent and stays in the audit log.`
+            : ''
+        }
+        confirmLabel="Waive penalty"
+        destructive
+        reasonLabel="Reason for waiving (required)"
+        onCancel={() => setWaiveChargeTarget(null)}
+        onConfirm={async (why) => {
+          if (!waiveChargeTarget) return;
+          await waiveCharge(waiveChargeTarget, why);
+          setWaiveChargeTarget(null);
+          await loadBorrowerData();
+          onDataChanged();
+        }}
+      />
     </Modal>
   );
 };
 
 const styles = StyleSheet.create({
+  penaltyCard: {
+    backgroundColor: '#fffbeb',
+    borderWidth: 1,
+    borderColor: '#fde68a',
+    borderRadius: 12,
+    padding: 14,
+    marginTop: 12,
+  },
+  penaltyHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  penaltyTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#78350f',
+  },
+  penaltySubtitle: {
+    fontSize: 11,
+    color: '#92400e',
+    marginTop: 2,
+  },
+  penaltyAmountLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#92400e',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  penaltyAmount: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#78350f',
+  },
+  penaltyAmountDue: {
+    color: '#b91c1c',
+  },
+  penaltyRuleLine: {
+    fontSize: 12,
+    color: '#78350f',
+    marginTop: 6,
+  },
+  penaltyChargeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#fde68a',
+  },
+  penaltyChargeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#7c2d12',
+  },
+  penaltyChargeMeta: {
+    fontSize: 10,
+    color: '#92400e',
+    marginTop: 2,
+  },
+  penaltyWaiveBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#fecaca',
+    backgroundColor: '#fef2f2',
+  },
+  penaltyWaiveText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#b91c1c',
+  },
+  penaltyActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 14,
+  },
+  penaltyActionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#b45309',
+    borderRadius: 10,
+    paddingVertical: 11,
+  },
+  penaltyActionBtnText: {
+    color: '#ffffff',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  penaltySecondaryBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+    borderRadius: 10,
+    paddingVertical: 11,
+  },
+  penaltySecondaryBtnText: {
+    color: '#0369a1',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  penaltyFootnote: {
+    fontSize: 10,
+    color: '#92400e',
+    lineHeight: 14,
+    marginTop: 10,
+  },
+
   overlay: {
     flex: 1,
     backgroundColor: 'rgba(12, 74, 110, 0.65)',

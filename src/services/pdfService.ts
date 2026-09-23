@@ -5,6 +5,7 @@ import { ledgerRepo } from '../db/repositories/ledgerRepo';
 import { borrowerRepo } from '../db/repositories/borrowerRepo';
 import { loanRepo } from '../db/repositories/loanRepo';
 import { paymentRepo } from '../db/repositories/paymentRepo';
+import { penaltyRepo } from '../db/repositories/penaltyRepo';
 import { formatCurrency, formatDbDate, getDaysLate, getScheduleRemaining } from '../utils/financial';
 import { canonicalMoney } from '../utils/money';
 
@@ -316,6 +317,34 @@ export async function exportLoanStatementPdf(input: StatementInput): Promise<voi
     payments.filter((p) => !p.voidedAt).reduce((s, p) => s + p.amountPaid, 0)
   );
 
+  // Penalties belong on the statement: they are money the borrower is being asked to pay, and an
+  // open fine is the single most likely reason a collection visit turns into an argument.
+  let penaltyRows = '<tr><td colspan="6">No penalties assessed.</td></tr>';
+  let penaltyOutstanding = 0;
+
+  try {
+    const charges = await penaltyRepo.getChargesForLoan(loan.id);
+    if (charges.length > 0) {
+      penaltyRows = charges
+        .map((charge) => {
+          const open = canonicalMoney(charge.amount - charge.paidAmount);
+          if (!charge.waivedAt) penaltyOutstanding = canonicalMoney(penaltyOutstanding + open);
+          return `<tr>
+            <td class="num">#${esc(charge.installmentNumber ?? '—')}</td>
+            <td>${charge.waivedAt ? '<span class="warn">WAIVED</span>' : esc(charge.daysLate + 'd late')}</td>
+            <td class="num">${money(charge.amount)}</td>
+            <td class="num">${money(charge.paidAmount)}</td>
+            <td class="num">${charge.waivedAt ? '—' : money(open)}</td>
+            <td>${esc(charge.waivedReason || (charge.waivedAt ? 'waived' : 'assessed'))}</td>
+          </tr>`;
+        })
+        .join('');
+    }
+  } catch {
+    // A database without the penalty tables still produces a valid statement.
+    penaltyRows = '<tr><td colspan="6">No penalties assessed.</td></tr>';
+  }
+
   const body = `
     <h2>Borrower</h2>
     <table class="totals">
@@ -336,12 +365,20 @@ export async function exportLoanStatementPdf(input: StatementInput): Promise<voi
       <tr><td class="label">Total payable</td><td class="value">${money(loan.totalPayable)}</td></tr>
       <tr><td class="label">Paid to date</td><td class="value">${money(paidTotal)}</td></tr>
       <tr><td class="label grand">Balance</td><td class="value grand">${money(loan.remainingBalance)}</td></tr>
+      <tr><td class="label">Penalties outstanding</td><td class="value">${money(penaltyOutstanding)}</td></tr>
+      <tr><td class="label">Total collectable</td><td class="value">${money(canonicalMoney(loan.remainingBalance + penaltyOutstanding))}</td></tr>
     </table>
 
     <h2>Installment schedule</h2>
     <table>
       <thead><tr><th class="num">#</th><th>Due date</th><th class="num">Expected</th><th class="num">Paid</th><th class="num">Remaining</th><th>Status</th></tr></thead>
       <tbody>${scheduleRows}</tbody>
+    </table>
+
+    <h2>Penalties assessed</h2>
+    <table>
+      <thead><tr><th class="num">Installment</th><th>Lateness</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Open</th><th>Note</th></tr></thead>
+      <tbody>${penaltyRows}</tbody>
     </table>
 
     <h2>Payment history</h2>

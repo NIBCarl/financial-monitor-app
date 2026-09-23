@@ -5,7 +5,6 @@ import {
   percentOfCents,
   roundHalfAwayFromZero,
   splitCents,
-  storedToCents,
   toCents,
 } from './money';
 
