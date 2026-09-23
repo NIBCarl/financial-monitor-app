@@ -6,8 +6,10 @@ import { borrowerRepo } from '../db/repositories/borrowerRepo';
 import { loanRepo } from '../db/repositories/loanRepo';
 import { paymentRepo } from '../db/repositories/paymentRepo';
 import { penaltyRepo } from '../db/repositories/penaltyRepo';
+import { sealRepo, type LedgerSeal } from '../db/repositories/sealRepo';
 import { formatCurrency, formatDbDate, getDaysLate, getScheduleRemaining } from '../utils/financial';
 import { canonicalMoney } from '../utils/money';
+import { toSvgRects } from '../utils/qr';
 
 /**
  * PDF documents.
@@ -64,6 +66,10 @@ function documentShell(title: string, orgName: string, body: string, footnote: s
   .pill { display: inline-block; font-size: 10px; padding: 2px 8px; border-radius: 999px; background: #e0f2fe; color: ${DEEP}; }
   .warn { color: #b91c1c; font-weight: 700; }
   .ok { color: #047857; font-weight: 700; }
+  .mono { font-family: monospace; font-size: 10px; }
+  .note { font-size: 11px; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 8px 10px; }
+  .qrrow { display: flex; align-items: center; gap: 14px; margin-top: 10px; page-break-inside: avoid; }
+  .qrhint { font-size: 10px; color: #64748b; line-height: 1.5; max-width: 260px; }
   .foot { margin-top: 26px; padding-top: 10px; border-top: 1px solid #e2e8f0; font-size: 10px; color: #94a3b8; }
 </style>
 </head>
@@ -118,6 +124,8 @@ export interface MonthlyReportInput {
   orgName: string;
   currencySymbol: string;
   monthLabel: string;
+  /** `YYYY-MM` the report covers; used to find the published seal. Defaults to today's month. */
+  period?: string;
 }
 
 /** The month-end report: cash, portfolio health, arrears, forecast, expenses and activity. */
@@ -184,6 +192,15 @@ export async function exportMonthlyReportPdf(input: MonthlyReportInput): Promise
     )
     .join('');
 
+  // The seal the members were given for this month, if the treasurer has closed it.
+  let seal: LedgerSeal | null = null;
+  try {
+    seal = await sealRepo.getLatestForPeriod(input.period ?? localToday().slice(0, 7));
+  } catch {
+    // A database without the seals table still produces a valid report.
+    seal = null;
+  }
+
   const body = `
     <h2>Cash position</h2>
     <div class="cards">
@@ -232,6 +249,19 @@ export async function exportMonthlyReportPdf(input: MonthlyReportInput): Promise
       <thead><tr><th>Date</th><th>Category</th><th>Description</th><th class="num">Amount</th></tr></thead>
       <tbody>${recentRows}</tbody>
     </table>
+
+    <h2>Published seal for this month</h2>
+    ${
+      seal
+        ? `<table class="totals">
+             <tr><td class="label">Seal code</td><td class="value">${esc(seal.sealCode)}</td></tr>
+             <tr><td class="label">Sealed on</td><td class="value">${esc(formatDbDate(seal.createdAt))}</td></tr>
+             <tr><td class="label">Entries covered</td><td class="value">${seal.auditCount}</td></tr>
+             <tr><td class="label">Chain head</td><td class="value mono">${esc(seal.chainHead.slice(0, 32))}…</td></tr>
+           </table>
+           <div class="qrrow">${toSvgRects(seal.sealCode, 132)}<div class="qrhint">Scan to compare against the seal the members received. A matching code means this report was not rewritten after the month was closed.</div></div>`
+        : `<p class="note">This month has not been sealed yet. Sealing it (Reports → Sealed months) fixes the figures and prints a code the members can check.</p>`
+    }
   `;
 
   await sharePdf(

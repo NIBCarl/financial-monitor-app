@@ -15,6 +15,7 @@ import { CheckCircle2, Share2, X, ShieldCheck, Download, Lock } from 'lucide-rea
 import { formatCurrency, formatDatePretty, formatDbDateTime } from '../utils/financial';
 import { ReceiptData } from '../db/types';
 import { buildReceiptVerification, isReceiptSettled, shareReceipt } from '../services/receiptService';
+import { ReceiptQr } from './ReceiptQr';
 
 interface ShareableReceiptModalProps {
   visible: boolean;
@@ -218,6 +219,16 @@ export const ShareableReceiptModal: React.FC<ShareableReceiptModalProps> = ({
                   </View>
                 </View>
               ) : null}
+
+              {/* Scan-to-verify square: the borrower's phone camera reads the signed token */}
+              {verification ? (
+                <View style={styles.qrBlock}>
+                  <ReceiptQr value={verification.token} size={112} />
+                  <Text style={styles.qrCaption}>
+                    Scan to read the signed code — or paste it into Reports → Verify a Receipt.
+                  </Text>
+                </View>
+              ) : null}
             </View>
 
           {/* Action Buttons with HCI touch size */}
@@ -394,6 +405,19 @@ const styles = StyleSheet.create({
   },
   verifyTextCol: {
     flex: 1,
+  },
+  qrBlock: {
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 12,
+    width: '100%',
+  },
+  qrCaption: {
+    fontSize: 10,
+    color: '#64748b',
+    textAlign: 'center',
+    lineHeight: 14,
+    paddingHorizontal: 8,
   },
   verifyLabel: {
     fontSize: 10,

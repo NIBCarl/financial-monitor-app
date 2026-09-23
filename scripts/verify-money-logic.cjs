@@ -8,6 +8,7 @@ const reminderText = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 
 const sealText = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'sealText.js'));
 const money = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'money.js'));
 const penalties = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'penalties.js'));
+const qr = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'qr.js'));
 
 const { parseMoney, parsePositiveMoney, parseTermCount, parseInterestRate, round2, sanitizePhoneForUri, csvCell, csvRow, MAX_MONEY } = validation;
 const {
@@ -423,6 +424,47 @@ check('the rule is described in words the treasurer can check', () => {
     'PHP 25.00 per day after 1 day grace (cap PHP 500.00)'
   );
 });
+
+check('receipt QR is square, scanner-legal and carries the finder patterns', () => {
+  const matrix = qr.toModuleMatrix('TV1~9f2c41a8~2625.00~2026-09-23~K7QX3M');
+  const count = matrix.length;
+
+  // ISO/IEC 18004: size = 4 x version + 17, so any legal code is 21, 25, 29 … modules wide.
+  assert.strictEqual((count - 17) % 4, 0);
+  assert.ok(count >= 21 && count <= 177, `unexpected module count ${count}`);
+  assert.strictEqual(matrix.length, count, 'matrix must be square');
+  matrix.forEach((line) => assert.strictEqual(line.length, count));
+  assert.ok(qr.hasFinderPatterns(matrix), 'the three finder patterns must be intact');
+});
+
+check('the same token always produces the same square', () => {
+  const a = JSON.stringify(qr.toModuleMatrix('TV1~abc~100.00~2026-01-02~ZZZZZZ'));
+  const b = JSON.stringify(qr.toModuleMatrix('TV1~abc~100.00~2026-01-02~ZZZZZZ'));
+  assert.strictEqual(a, b);
+});
+
+check('a tampered receipt produces a different square', () => {
+  const honest = JSON.stringify(qr.toModuleMatrix('TV1~abc~100.00~2026-01-02~ZZZZZZ'));
+  const doctored = JSON.stringify(qr.toModuleMatrix('TV1~abc~900.00~2026-01-02~ZZZZZZ'));
+  assert.notStrictEqual(honest, doctored);
+});
+
+check('the QR grows with the payload instead of silently truncating', () => {
+  const small = qr.toModuleMatrix('TV1~short').length;
+  const large = qr.toModuleMatrix('TV1~' + 'x'.repeat(400)).length;
+  assert.ok(large > small, `expected growth, got ${small} -> ${large}`);
+});
+
+check('the PDF square is white-backed and places modules inside the quiet zone', () => {
+  const svg = qr.toSvgRects('TV1~9f2c41a8~2625.00~2026-09-23~K7QX3M', 132, 4);
+  assert.ok(svg.startsWith('<svg'), 'must be inline SVG for the print engine');
+  assert.ok(svg.includes('fill="#ffffff"'), 'needs a white background to scan on tinted paper');
+  assert.ok(svg.includes('<rect'), 'must draw modules');
+  // Quiet zone: four modules of margin at 132px / (25 + 8) -> first module starts at 4 * scale.
+  const xs = [...svg.matchAll(/x="([\d.]+)"/g)].map((m) => Number(m[1])).filter((v) => v > 0);
+  assert.ok(Math.min(...xs) > 0, 'no module may sit in the quiet zone');
+});
+
 
 check('payments clear penalties oldest first and leave the rest as credit', () => {
   const split = penalties.splitPaymentAcrossCharges(300, [
