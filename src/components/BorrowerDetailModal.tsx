@@ -31,6 +31,7 @@ import {
   Share2,
   ShieldCheck,
   FileText,
+  PenLine,
 } from 'lucide-react-native';
 import {
   Borrower,
@@ -53,6 +54,11 @@ import { describePenaltyRule } from '../utils/penalties';
 import { canonicalMoney } from '../utils/money';
 import { ConfirmReasonModal } from './ConfirmReasonModal';
 import { PenaltyRulesModal } from './PenaltyRulesModal';
+import { SignaturePadModal } from './SignaturePadModal';
+import { SignatureView } from './SignatureView';
+import { signatureRepo } from '../db/repositories/signatureRepo';
+import type { SignatureEntity, BorrowerSignature, SignatureStrokes } from '../db/types';
+import { parseStoredStrokes } from '../utils/signature';
 import {
   calculateAmortization,
   formatCurrency,
@@ -121,6 +127,15 @@ export const BorrowerDetailModal: React.FC<BorrowerDetailModalProps> = ({
   const [assessing, setAssessing] = useState(false);
   const [waiveChargeTarget, setWaiveChargeTarget] = useState<PenaltyCharge | null>(null);
 
+  // Signatures: what the borrower acknowledged, captured on the spot.
+  const [loanSignatures, setLoanSignatures] = useState<Record<string, BorrowerSignature>>({});
+  const [paymentSignatures, setPaymentSignatures] = useState<Record<string, BorrowerSignature>>({});
+  const [signPad, setSignPad] = useState<{
+    entity: SignatureEntity;
+    entityId: string;
+    subject: string;
+  } | null>(null);
+
   const openPenaltyTotal = useMemo(
     () =>
       canonicalMoney(
@@ -185,6 +200,23 @@ export const BorrowerDetailModal: React.FC<BorrowerDetailModalProps> = ({
         console.warn('Penalty data unavailable:', penaltyErr);
         setPenaltyRules([]);
         setPenaltyCharges([]);
+      }
+
+      // Signatures on file for this borrower's loans and payments, in two batched reads.
+      try {
+        const [loanSigs, paymentSigs] = await Promise.all([
+          signatureRepo.getForEntities('LOAN', loanIds),
+          signatureRepo.getForEntities(
+            'PAYMENT',
+            allPayments.map((payment) => payment.id)
+          ),
+        ]);
+        setLoanSignatures(loanSigs);
+        setPaymentSignatures(paymentSigs);
+      } catch (sigErr) {
+        console.warn('Signature data unavailable:', sigErr);
+        setLoanSignatures({});
+        setPaymentSignatures({});
       }
     } catch (err) {
       console.error('Failed to load borrower data:', err);
@@ -309,6 +341,23 @@ export const BorrowerDetailModal: React.FC<BorrowerDetailModalProps> = ({
     } finally {
       setPdfBusy(false);
     }
+  };
+
+  /** Saves a captured signature and refreshes, so the receipt/statement pick it up immediately. */
+  const handleSaveSignature = async (strokes: SignatureStrokes) => {
+    if (!borrower || !signPad) return;
+
+    await signatureRepo.save({
+      entity: signPad.entity,
+      entityId: signPad.entityId,
+      borrowerId: borrower.id,
+      signerName: borrower.fullName,
+      strokes,
+    });
+
+    setSignPad(null);
+    await loadBorrowerData();
+    onDataChanged();
   };
 
   const handleAssessPenalties = async () => {
@@ -885,6 +934,36 @@ export const BorrowerDetailModal: React.FC<BorrowerDetailModalProps> = ({
                     <Text style={styles.generalPayBtnText}>Record Custom Amount</Text>
                   </TouchableOpacity>
 
+                  {/* Borrower's acknowledgment of the loan terms */}
+                  <View style={styles.signatureBlock}>
+                    <View style={styles.signatureHeader}>
+                      <Text style={styles.signatureTitle}>Borrower signature</Text>
+                      <TouchableOpacity
+                        style={styles.signatureButton}
+                        onPress={() =>
+                          setSignPad({
+                            entity: 'LOAN',
+                            entityId: activeLoan.id,
+                            subject: `Loan of ${formatCurrency(activeLoan.principalAmount, currencySymbol)} issued ${formatDatePretty(activeLoan.startDate)}`,
+                          })
+                        }
+                      >
+                        <PenLine size={13} color="#0369a1" />
+                        <Text style={styles.signatureButtonText}>
+                          {loanSignatures[activeLoan.id] ? 'Re-sign' : 'Capture'}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                    <SignatureView
+                      strokes={loanSignatures[activeLoan.id]?.strokes ?? null}
+                      signerName={loanSignatures[activeLoan.id]?.signerName}
+                      takenAt={loanSignatures[activeLoan.id]?.takenAt}
+                      width={250}
+                      height={80}
+                      emptyLabel="Not signed yet — tap Capture"
+                    />
+                  </View>
+
                   {/* Printable statement of account for this loan */}
                   <TouchableOpacity
                     style={[styles.statementBtn, pdfBusy && styles.statementBtnBusy]}
@@ -1349,6 +1428,38 @@ export const BorrowerDetailModal: React.FC<BorrowerDetailModalProps> = ({
                   <Text style={styles.badgeFooterText}>Recorded in Offline Treasury Ledger</Text>
                 </View>
 
+                {/* The borrower's acknowledgment of this payment, captured while they are still there */}
+                {currentReceipt ? (
+                  <View style={styles.signatureBlock}>
+                    <View style={styles.signatureHeader}>
+                      <Text style={styles.signatureTitle}>Borrower signature</Text>
+                      <TouchableOpacity
+                        style={styles.signatureButton}
+                        onPress={() =>
+                          setSignPad({
+                            entity: 'PAYMENT',
+                            entityId: currentReceipt.paymentId,
+                            subject: `Payment of ${formatCurrency(currentReceipt.amountPaid, currencySymbol)} received`,
+                          })
+                        }
+                      >
+                        <PenLine size={13} color="#0369a1" />
+                        <Text style={styles.signatureButtonText}>
+                          {paymentSignatures[currentReceipt.paymentId] ? 'Re-sign' : 'Capture'}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                    <SignatureView
+                      strokes={paymentSignatures[currentReceipt.paymentId]?.strokes ?? null}
+                      signerName={paymentSignatures[currentReceipt.paymentId]?.signerName}
+                      takenAt={paymentSignatures[currentReceipt.paymentId]?.takenAt}
+                      width={250}
+                      height={80}
+                      emptyLabel="Not signed — ask the borrower to sign"
+                    />
+                  </View>
+                ) : null}
+
                 <View style={styles.receiptActions}>
                   <TouchableOpacity
                     style={styles.receiptDoneBtn}
@@ -1379,6 +1490,22 @@ export const BorrowerDetailModal: React.FC<BorrowerDetailModalProps> = ({
           void loadBorrowerData();
           onDataChanged();
         }}
+      />
+
+      <SignaturePadModal
+        visible={signPad !== null}
+        title="Borrower signature"
+        subject={signPad?.subject ?? ''}
+        signerName={borrower.fullName}
+        existing={
+          signPad ? parseStoredStrokes(
+            signPad.entity === 'LOAN'
+              ? loanSignatures[signPad.entityId]?.strokes
+              : paymentSignatures[signPad.entityId]?.strokes
+          ) : null
+        }
+        onCancel={() => setSignPad(null)}
+        onSave={handleSaveSignature}
       />
 
       <ConfirmReasonModal
@@ -2399,5 +2526,42 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '800',
     color: '#ffffff',
+  },
+  signatureBlock: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  signatureHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  signatureTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#0f172a',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  signatureButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+    backgroundColor: '#f0f9ff',
+  },
+  signatureButtonText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#0369a1',
   },
 });

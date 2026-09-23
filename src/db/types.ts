@@ -64,7 +64,15 @@ export interface LoanSchedule {
   settledDate?: string | null;
 }
 
-export type AuditEntity = 'loan_payment' | 'ledger_transaction' | 'loan' | 'borrower' | 'settings' | 'penalty_rule' | 'penalty_charge';
+export type AuditEntity =
+  | 'loan_payment'
+  | 'ledger_transaction'
+  | 'loan'
+  | 'borrower'
+  | 'settings'
+  | 'penalty_rule'
+  | 'penalty_charge'
+  | 'signature';
 
 export type AuditAction = 'CREATE' | 'UPDATE' | 'VOID' | 'WAIVE';
 
@@ -82,6 +90,24 @@ export type PenaltyBasis = 'FLAT' | 'PERCENT';
 
 /** How often the penalty is charged while the installment stays unpaid. */
 export type PenaltyPeriod = 'DAY' | 'WEEK' | 'MONTH';
+
+/** What a signature is attached to. */
+export type SignatureEntity = 'LOAN' | 'PAYMENT';
+
+/** One captured signature: a set of pen strokes in normalised (0..1) coordinates. */
+export interface BorrowerSignature {
+  id: string;
+  entity: SignatureEntity;
+  entityId: string;
+  borrowerId?: string | null;
+  signerName?: string | null;
+  /** JSON-encoded `SignatureStrokes` — normalised so it renders at any size. */
+  strokes: string;
+  takenAt: string;
+}
+
+/** `[[{x, y}, …], …]` — each inner array is one continuous pen stroke, coordinates 0..1. */
+export type SignatureStrokes = { x: number; y: number }[][];
 
 export interface PenaltyRule {
   id: string;

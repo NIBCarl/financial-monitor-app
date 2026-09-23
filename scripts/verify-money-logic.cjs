@@ -9,6 +9,7 @@ const sealText = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'sea
 const money = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'money.js'));
 const penalties = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'penalties.js'));
 const qr = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'qr.js'));
+const signature = require(path.join(__dirname, '..', '.verify-tmp', 'utils', 'signature.js'));
 
 const { parseMoney, parsePositiveMoney, parseTermCount, parseInterestRate, round2, sanitizePhoneForUri, csvCell, csvRow, MAX_MONEY } = validation;
 const {
@@ -36,6 +37,13 @@ const {
   roundHalfAwayFromZero,
 } = money;
 const { computePenalty, describePenaltyRule } = penalties;
+const {
+  normaliseStrokes,
+  isSignatureTooSmall,
+  strokesToSvgPath,
+  signatureToSvgDocument,
+  parseStoredStrokes,
+} = signature;
 
 let passed = 0;
 const check = (label, fn) => {
@@ -511,6 +519,124 @@ check('no leftover cash means no penalty allocation at all', () => {
   const split = penalties.splitPaymentAcrossCharges(0, [{ id: 'c1', amount: 100, paidAmount: 0 }]);
   assert.strictEqual(split.penaltyApplied, 0);
   assert.strictEqual(split.updates.length, 0);
+});
+
+/* ------------------------------------------------------------------ signatures (report §20.6) */
+
+check('strokes are normalised to the pad, so any device size gives the same signature', () => {
+  const strokes = normaliseStrokes([[{ x: 0, y: 0 }, { x: 150, y: 85 }]], 300, 170);
+  assert.strictEqual(strokes.length, 1);
+  assert.deepStrictEqual(strokes[0][0], { x: 0, y: 0 });
+  assert.deepStrictEqual(strokes[0][1], { x: 0.5, y: 0.5 });
+});
+
+check('points outside the pad are clamped, never negative or past 1', () => {
+  const strokes = normaliseStrokes([[{ x: -40, y: -10 }, { x: 900, y: 400 }]], 300, 170);
+  assert.deepStrictEqual(strokes[0][0], { x: 0, y: 0 });
+  assert.deepStrictEqual(strokes[0][1], { x: 1, y: 1 });
+});
+
+check('jitter is dropped, so a shaky finger does not inflate the stored mark', () => {
+  const jitter = [];
+  for (let i = 0; i < 200; i++) jitter.push({ x: 100 + i * 0.01, y: 40 + i * 0.01 });
+  const strokes = normaliseStrokes([jitter], 300, 170);
+  // 200 sub-pixel moves collapse to a handful of points, not 200.
+  assert.ok(strokes[0].length > 1 && strokes[0].length < 40, `kept ${strokes[0].length} points`);
+});
+
+check('nothing drawn, or a zero-sized pad, stores no strokes at all', () => {
+  assert.deepStrictEqual(normaliseStrokes([], 300, 170), []);
+  assert.deepStrictEqual(normaliseStrokes([[{ x: 5, y: 5 }]], 0, 170), []);
+  assert.deepStrictEqual(normaliseStrokes([[]], 300, 170), []);
+});
+
+check('a tap is rejected as too small to be a signature', () => {
+  assert.strictEqual(isSignatureTooSmall([[], [{ x: 0.5, y: 0.5 }]]), true);
+  assert.strictEqual(
+    isSignatureTooSmall([
+      [
+        { x: 0.1, y: 0.2 },
+        { x: 0.4, y: 0.3 },
+        { x: 0.7, y: 0.25 },
+        { x: 0.9, y: 0.4 },
+      ],
+    ]),
+    false
+  );
+});
+
+check('the SVG path scales normalised strokes into the box it is drawn in', () => {
+  const path = strokesToSvgPath(
+    [
+      [
+        { x: 0, y: 0 },
+        { x: 0.5, y: 0.5 },
+      ],
+    ],
+    200,
+    100
+  );
+  assert.strictEqual(path, 'M 0.00 0.00 L 100.00 50.00');
+});
+
+check('a single-point stroke still draws as a visible dot', () => {
+  const path = strokesToSvgPath([[{ x: 0.25, y: 0.5 }]], 200, 100);
+  assert.strictEqual(path, 'M 50.00 50.00 l 0.01 0');
+});
+
+check('several strokes are joined into one path, and nothing renders as an empty string', () => {
+  const path = strokesToSvgPath(
+    [
+      [
+        { x: 0, y: 0 },
+        { x: 1, y: 1 },
+      ],
+      [
+        { x: 0, y: 1 },
+        { x: 1, y: 0 },
+      ],
+    ],
+    100,
+    100
+  );
+  assert.strictEqual(path.split('M ').length - 1, 2);
+  assert.strictEqual(strokesToSvgPath([], 100, 100), '');
+});
+
+check('the PDF document wraps the same strokes in a standalone SVG', () => {
+  const doc = signatureToSvgDocument(
+    [
+      [
+        { x: 0, y: 0 },
+        { x: 1, y: 1 },
+      ],
+    ],
+    220,
+    66
+  );
+  assert.ok(doc.startsWith('<svg xmlns="http://www.w3.org/2000/svg"'));
+  assert.ok(doc.includes('width="220" height="66"'));
+  assert.ok(doc.includes('M 0.00 0.00 L 220.00 66.00'));
+  assert.ok(doc.endsWith('</svg>'));
+});
+
+check('a corrupted or tampered row parses as unsigned instead of crashing the receipt', () => {
+  assert.deepStrictEqual(parseStoredStrokes(null), []);
+  assert.deepStrictEqual(parseStoredStrokes(undefined), []);
+  assert.deepStrictEqual(parseStoredStrokes('not json'), []);
+  assert.deepStrictEqual(parseStoredStrokes('{"strokes":[]}'), []);
+  assert.deepStrictEqual(parseStoredStrokes('[null, 5, "x"]'), []);
+  assert.deepStrictEqual(parseStoredStrokes('[["a"], [{"x":"no","y":2}]]'), []);
+});
+
+check('a stored signature round-trips through JSON unchanged', () => {
+  const strokes = [
+    [
+      { x: 0.1234, y: 0.5678 },
+      { x: 0.9, y: 0.1 },
+    ],
+  ];
+  assert.deepStrictEqual(parseStoredStrokes(JSON.stringify(strokes)), strokes);
 });
 
 console.log(`\n${passed} checks passed${process.exitCode ? ' (WITH FAILURES)' : ' — all good'}\n`);

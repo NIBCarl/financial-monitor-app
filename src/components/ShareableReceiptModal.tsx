@@ -16,6 +16,9 @@ import { formatCurrency, formatDatePretty, formatDbDateTime } from '../utils/fin
 import { ReceiptData } from '../db/types';
 import { buildReceiptVerification, isReceiptSettled, shareReceipt } from '../services/receiptService';
 import { ReceiptQr } from './ReceiptQr';
+import { SignatureView } from './SignatureView';
+import { signatureRepo } from '../db/repositories/signatureRepo';
+import type { BorrowerSignature } from '../db/types';
 
 interface ShareableReceiptModalProps {
   visible: boolean;
@@ -33,6 +36,29 @@ export const ShareableReceiptModal: React.FC<ShareableReceiptModalProps> = ({
   const cardRef = useRef<View>(null);
   const [verification, setVerification] = useState<{ code: string; token: string } | null>(null);
   const [sharingImage, setSharingImage] = useState(false);
+  const [signature, setSignature] = useState<BorrowerSignature | null>(null);
+
+  // A receipt the borrower signed is much harder to dispute later, so the mark goes on the card
+  // itself — the same image that gets shared as a PNG.
+  useEffect(() => {
+    if (!visible || !receipt) return;
+
+    let active = true;
+    const loadSignature = async () => {
+      try {
+        const row = await signatureRepo.getFor('PAYMENT', receipt.paymentId);
+        if (active) setSignature(row);
+      } catch (err) {
+        console.warn('Signature unavailable for receipt:', err);
+        if (active) setSignature(null);
+      }
+    };
+
+    void loadSignature();
+    return () => {
+      active = false;
+    };
+  }, [visible, receipt]);
 
   // Sign the receipt once it is shown, so the card and the shared text carry the same code.
   useEffect(() => {
@@ -198,6 +224,24 @@ export const ShareableReceiptModal: React.FC<ShareableReceiptModalProps> = ({
                   style={styles.stampImage}
                   resizeMode="contain"
                 />
+              </View>
+
+              {/* The borrower's own mark, captured when the money was handed over */}
+              <View style={styles.signatureBlock}>
+                <Text style={styles.signatureTitle}>Borrower signature</Text>
+                {signature ? (
+                  <SignatureView
+                    strokes={signature.strokes}
+                    signerName={signature.signerName}
+                    takenAt={signature.takenAt}
+                    width={228}
+                    height={72}
+                  />
+                ) : (
+                  <Text style={styles.signatureHint}>
+                    Not signed yet — open the borrower profile and tap Capture to add the mark.
+                  </Text>
+                )}
               </View>
 
               {/* Treasurer Badge */}
@@ -373,6 +417,31 @@ const styles = StyleSheet.create({
   stampImage: {
     width: 86,
     height: 86,
+  },
+  signatureBlock: {
+    width: '100%',
+    marginTop: 12,
+    padding: 10,
+    borderRadius: 10,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    alignItems: 'center',
+  },
+  signatureTitle: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#64748b',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  signatureHint: {
+    fontSize: 11,
+    color: '#94a3b8',
+    textAlign: 'center',
+    paddingVertical: 8,
+    lineHeight: 15,
   },
   badgeFooter: {
     flexDirection: 'row',

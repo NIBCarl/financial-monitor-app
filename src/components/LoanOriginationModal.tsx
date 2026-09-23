@@ -13,6 +13,9 @@ import {
 import { X, Calculator, Calendar, CheckCircle, Percent } from 'lucide-react-native';
 import { Borrower, InterestType, RepaymentFrequency } from '../db/types';
 import { loanRepo } from '../db/repositories/loanRepo';
+import { signatureRepo } from '../db/repositories/signatureRepo';
+import { SignaturePadModal } from './SignaturePadModal';
+import type { SignatureStrokes } from '../db/types';
 import { calculateAmortization, formatCurrency, formatDatePretty } from '../utils/financial';
 import { parseMoney, parseInterestRate, parseTermCount } from '../utils/validation';
 import { format } from 'date-fns';
@@ -39,6 +42,12 @@ export const LoanOriginationModal: React.FC<LoanOriginationModalProps> = ({
   const [termCountStr, setTermCountStr] = useState('4');
   const [startDateStr] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [loading, setLoading] = useState(false);
+
+  // A disbursement is the moment the borrower takes the money, so it is the natural moment to sign
+  // for it. The loan exists by this point; the signature is the last step before the modal closes.
+  const [pendingSignature, setPendingSignature] = useState<{ loanId: string; amount: number } | null>(
+    null
+  );
 
   const principalResult = parseMoney(principalStr);
   const principal = principalResult.ok ? principalResult.value : 0;
@@ -78,12 +87,45 @@ export const LoanOriginationModal: React.FC<LoanOriginationModalProps> = ({
         startDate: startDateStr,
       });
 
-      onSuccess(loanId);
+      // The loan is on the books; ask for the borrower's signature before letting the modal close.
+      setPendingSignature({ loanId, amount });
     } catch (err) {
       Alert.alert('Error', err instanceof Error ? err.message : 'Failed to disburse loan.');
     } finally {
       setLoading(false);
     }
+  };
+
+  /** Closes out the disbursement flow and hands the caller the new loan. */
+  const finishDisbursement = () => {
+    const loanId = pendingSignature?.loanId;
+    setPendingSignature(null);
+    if (loanId) onSuccess(loanId);
+  };
+
+  const handleSaveSignature = async (strokes: SignatureStrokes) => {
+    if (!pendingSignature || !borrower) return;
+
+    await signatureRepo.save({
+      entity: 'LOAN',
+      entityId: pendingSignature.loanId,
+      borrowerId: borrower.id,
+      signerName: borrower.fullName,
+      strokes,
+    });
+
+    finishDisbursement();
+  };
+
+  const handleSkipSignature = () => {
+    Alert.alert(
+      'Disburse without a signature?',
+      'The loan is already recorded. You can still capture the signature later from the borrower profile.',
+      [
+        { text: 'Keep signing', style: 'cancel' },
+        { text: 'Continue', style: 'destructive', onPress: finishDisbursement },
+      ]
+    );
   };
 
   const handleDisburse = () => {
@@ -351,6 +393,21 @@ export const LoanOriginationModal: React.FC<LoanOriginationModalProps> = ({
           </View>
         </View>
       </View>
+
+      {/* Signature capture is a modal of its own, stacked over the form, so the pad gets the full
+          screen width and the borrower can sign without the form's fields behind it. */}
+      <SignaturePadModal
+        visible={pendingSignature !== null}
+        title="Loan acknowledgment"
+        subject={
+          pendingSignature
+            ? `${formatCurrency(pendingSignature.amount, currencySymbol)} disbursed to ${borrower?.fullName ?? 'borrower'}`
+            : ''
+        }
+        signerName={borrower?.fullName ?? 'the borrower'}
+        onCancel={handleSkipSignature}
+        onSave={handleSaveSignature}
+      />
     </Modal>
   );
 };

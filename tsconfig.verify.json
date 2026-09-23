@@ -14,6 +14,7 @@
     "src/utils/money.ts",
     "src/utils/penalties.ts",
     "src/utils/qr.ts",
+    "src/utils/signature.ts",
     "src/utils/financial.ts",
     "src/utils/reminderText.ts",
     "src/utils/sealText.ts",

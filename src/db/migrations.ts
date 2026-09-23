@@ -13,7 +13,7 @@ import { Platform } from 'react-native';
  * without touching their data.
  */
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /** Subset of the database API a migration may use (a Transaction satisfies this too). */
 type SqlRunner = Pick<SQLite.SQLiteDatabase, 'execAsync' | 'runAsync' | 'getFirstAsync' | 'getAllAsync'>;
@@ -281,6 +281,40 @@ const MIGRATIONS: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_penalty_charges_borrower ON penalty_charges(borrower_id, waived_at);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_penalty_charges_unique
           ON penalty_charges(rule_id, schedule_id) WHERE schedule_id IS NOT NULL;
+      `);
+    },
+  },
+  {
+    version: 5,
+    name: 'borrower_signatures',
+    /**
+     * The borrower's own mark on the money (report §20.6).
+     *
+     * Until now the app was the treasurer's private notebook: nothing recorded that the borrower
+     * agreed to the loan or acknowledged receiving/handing over cash. These rows are that
+     * acknowledgment — captured on the phone at the moment it happened and attached to the exact
+     * record, so "I never got that money" has something to answer it.
+     *
+     * `strokes` is normalised JSON ([[{x,y}, …], …] with 0..1 coordinates) rather than a bitmap:
+     * it stays crisp at any size, embeds directly in a PDF as an SVG path, and cannot smuggle in a
+     * photograph of someone else's signature. One signature per record; re-signing replaces it and
+     * the previous version stays in the audit log.
+     */
+    up: async (db) => {
+      await db.execAsync(`
+        CREATE TABLE IF NOT EXISTS signatures (
+          id TEXT PRIMARY KEY NOT NULL,
+          entity TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          borrower_id TEXT,
+          signer_name TEXT,
+          strokes TEXT NOT NULL,
+          taken_at TEXT NOT NULL DEFAULT (datetime('now')),
+          FOREIGN KEY (borrower_id) REFERENCES borrowers(id) ON DELETE CASCADE
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_signatures_unique ON signatures(entity, entity_id);
+        CREATE INDEX IF NOT EXISTS idx_signatures_borrower ON signatures(borrower_id);
       `);
     },
   },

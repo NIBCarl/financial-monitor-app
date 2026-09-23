@@ -6,9 +6,12 @@ import { borrowerRepo } from '../db/repositories/borrowerRepo';
 import { loanRepo } from '../db/repositories/loanRepo';
 import { paymentRepo } from '../db/repositories/paymentRepo';
 import { penaltyRepo } from '../db/repositories/penaltyRepo';
+import { signatureRepo } from '../db/repositories/signatureRepo';
 import { sealRepo, type LedgerSeal } from '../db/repositories/sealRepo';
-import { formatCurrency, formatDbDate, getDaysLate, getScheduleRemaining } from '../utils/financial';
+import type { BorrowerSignature } from '../db/types';
+import { formatCurrency, formatDbDate, formatDbDateTime, getDaysLate, getScheduleRemaining } from '../utils/financial';
 import { canonicalMoney } from '../utils/money';
+import { parseStoredStrokes, signatureToSvgDocument } from '../utils/signature';
 import { toSvgRects } from '../utils/qr';
 
 /**
@@ -70,6 +73,11 @@ function documentShell(title: string, orgName: string, body: string, footnote: s
   .note { font-size: 11px; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 8px 10px; }
   .qrrow { display: flex; align-items: center; gap: 14px; margin-top: 10px; page-break-inside: avoid; }
   .qrhint { font-size: 10px; color: #64748b; line-height: 1.5; max-width: 260px; }
+  .sigrow { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; page-break-inside: avoid; }
+  .sigbox { border: 1px solid #e2e8f0; border-radius: 8px; padding: 9px 11px; min-width: 190px; }
+  .siglabel { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: #64748b; margin-bottom: 5px; }
+  .sigempty { font-size: 11px; color: #94a3b8; padding: 12px 0 6px 0; }
+  .sigcap { font-size: 10px; color: #475569; margin-top: 5px; }
   .foot { margin-top: 26px; padding-top: 10px; border-top: 1px solid #e2e8f0; font-size: 10px; color: #94a3b8; }
 </style>
 </head>
@@ -82,6 +90,29 @@ function documentShell(title: string, orgName: string, body: string, footnote: s
   <div class="foot">${esc(generated)}<br/>${esc(footnote)}</div>
 </body>
 </html>`;
+}
+
+/**
+ * A signature block for the statement.
+ *
+ * The mark is inlined as SVG rather than a bitmap: it stays sharp when printed, it stays small in
+ * the HTML, and it is the same normalised data the capture pad and the app render.
+ */
+function signatureBlock(label: string, row: BorrowerSignature | null | undefined): string {
+  const strokes = row ? parseStoredStrokes(row.strokes) : [];
+
+  if (!row || strokes.length === 0) {
+    return `<div class="sigbox">
+      <div class="siglabel">${esc(label)}</div>
+      <div class="sigempty">No signature on file</div>
+    </div>`;
+  }
+
+  return `<div class="sigbox">
+    <div class="siglabel">${esc(label)}</div>
+    ${signatureToSvgDocument(strokes, 220, 66)}
+    <div class="sigcap">${esc(row.signerName || 'Borrower')} · ${esc(formatDbDateTime(row.takenAt))}</div>
+  </div>`;
 }
 
 /** Renders HTML to a PDF file and hands it to the share sheet. */
@@ -337,15 +368,48 @@ export async function exportLoanStatementPdf(input: StatementInput): Promise<voi
             <td>${esc(p.paymentMethod)}</td>
             <td>${esc(p.referenceNo || '—')}</td>
             <td>${p.voidedAt ? '<span class="warn">VOID</span>' : 'Posted'}</td>
+            <td>${signedPayments[p.id] ? '<span class="ok">Signed</span>' : '—'}</td>
             <td class="num">${p.voidedAt ? '—' : money(p.amountPaid)}</td>
           </tr>`
         )
         .join('')
-    : '<tr><td colspan="5">No payments recorded yet.</td></tr>';
+    : '<tr><td colspan="6">No payments recorded yet.</td></tr>';
 
   const paidTotal = canonicalMoney(
     payments.filter((p) => !p.voidedAt).reduce((s, p) => s + p.amountPaid, 0)
   );
+
+  // Signatures: the loan acknowledgment plus a mark for every payment that was signed. A statement
+  // without the borrower's own mark is just the treasurer's word, so this section matters when the
+  // paper is used to settle a disagreement.
+  let loanSignature: BorrowerSignature | null = null;
+  let signedPayments: Record<string, BorrowerSignature> = {};
+
+  try {
+    const [loanSig, paymentSigs] = await Promise.all([
+      signatureRepo.getFor('LOAN', loan.id),
+      signatureRepo.getForEntities(
+        'PAYMENT',
+        payments.map((p) => p.id)
+      ),
+    ]);
+    loanSignature = loanSig;
+    signedPayments = paymentSigs;
+  } catch {
+    // A database without the signatures table still produces a valid statement.
+    loanSignature = null;
+    signedPayments = {};
+  }
+
+  const paymentSignatureBlocks = payments
+    .filter((p) => signedPayments[p.id])
+    .map((p) =>
+      signatureBlock(
+        `Payment ${money(p.amountPaid)} · ${formatDbDate(p.paidAt)}`,
+        signedPayments[p.id]
+      )
+    )
+    .join('');
 
   // Penalties belong on the statement: they are money the borrower is being asked to pay, and an
   // open fine is the single most likely reason a collection visit turns into an argument.
@@ -413,9 +477,15 @@ export async function exportLoanStatementPdf(input: StatementInput): Promise<voi
 
     <h2>Payment history</h2>
     <table>
-      <thead><tr><th>Date</th><th>Method</th><th>Reference</th><th>Status</th><th class="num">Amount</th></tr></thead>
+      <thead><tr><th>Date</th><th>Method</th><th>Reference</th><th>Status</th><th>Signed</th><th class="num">Amount</th></tr></thead>
       <tbody>${paymentRows}</tbody>
     </table>
+
+    <h2>Acknowledgments</h2>
+    <div class="sigrow">
+      ${signatureBlock('Loan acknowledgment', loanSignature)}
+      ${paymentSignatureBlocks}
+    </div>
   `;
 
   await sharePdf(
