@@ -111,7 +111,9 @@ export default function ReportsScreen() {
           reportsRepo.getAgingSchedule(),
           reportsRepo.getPortfolioRisk(),
           reportsRepo.getForecast(3),
-          listAutoBackups(),
+          // A device that will not list its backup folder must not stop the reports screen from
+          // loading its figures — the backup list is a convenience, the numbers are the job.
+          listAutoBackups().catch(() => [] as StoredBackup[]),
         ]);
       setMetrics(metrics);
       setLastBackupAt(lastBackup);
@@ -158,7 +160,7 @@ export default function ReportsScreen() {
       await settingsRepo.set('last_backup_at', summary.generatedAt);
       setLastBackupAt(summary.generatedAt);
       setAutoBackupNote(`Automatic backup written just now (${summary.fileName}).`);
-      const stored = await listAutoBackups();
+      const stored = await listAutoBackups().catch(() => [] as StoredBackup[]);
       setAutoBackupCount(stored.length);
       setDeviceBackups(stored);
 
