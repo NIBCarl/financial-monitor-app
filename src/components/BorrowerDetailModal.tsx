@@ -416,7 +416,7 @@ export const BorrowerDetailModal: React.FC<BorrowerDetailModalProps> = ({
 
   const recentPayments = activeLoan ? (paymentsMap[activeLoan.id] ?? []).slice(0, 4) : [];
 
-  const paymentMethods: Array<{ label: string; value: PaymentMethod }> = [
+  const paymentMethods: { label: string; value: PaymentMethod }[] = [
     { label: 'Cash', value: 'CASH' },
     { label: 'GCash / Maya', value: 'GCASH' },
     { label: 'Bank Transfer', value: 'BANK_TRANSFER' },

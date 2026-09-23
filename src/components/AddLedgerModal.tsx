@@ -33,13 +33,13 @@ export const AddLedgerModal: React.FC<AddLedgerModalProps> = ({
   const [description, setDescription] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const inflowCategories: Array<{ label: string; value: TransactionCategory }> = [
+  const inflowCategories: { label: string; value: TransactionCategory }[] = [
     { label: 'Member Dues', value: 'MEMBERSHIP_DUES' },
     { label: 'Donation', value: 'DONATION' },
     { label: 'Other Inflow', value: 'OTHER' },
   ];
 
-  const outflowCategories: Array<{ label: string; value: TransactionCategory }> = [
+  const outflowCategories: { label: string; value: TransactionCategory }[] = [
     { label: 'Supplies & Expenses', value: 'EXPENSE' },
     { label: 'Other Outflow', value: 'OTHER' },
   ];

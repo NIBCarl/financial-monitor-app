@@ -453,7 +453,7 @@ export const paymentRepo = {
     );
   },
 
-  async getAllPayments(limit: number = 20): Promise<Array<LoanPayment & { borrowerName: string }>> {
+  async getAllPayments(limit: number = 20): Promise<(LoanPayment & { borrowerName: string })[]> {
     const db = await getDatabase();
     const rows = await db.getAllAsync<any>(
       `SELECT

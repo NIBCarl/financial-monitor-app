@@ -56,7 +56,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const installmentDue = schedule ? getScheduleRemaining(schedule) : outstandingBalance;
   const amountStr = amountOverride ?? (installmentDue > 0 ? installmentDue.toFixed(2) : '');
 
-  const paymentMethods: Array<{ label: string; value: PaymentMethod }> = [
+  const paymentMethods: { label: string; value: PaymentMethod }[] = [
     { label: 'Cash', value: 'CASH' },
     { label: 'GCash / Maya', value: 'GCASH' },
     { label: 'Bank Transfer', value: 'BANK_TRANSFER' },

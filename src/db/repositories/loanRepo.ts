@@ -176,7 +176,7 @@ export const loanRepo = {
   async getDueAndOverdueSchedules(
     untilDate: string = format(addDays(new Date(), 7), 'yyyy-MM-dd'),
     limit: number = 200
-  ): Promise<Array<LoanSchedule & { borrowerName: string; borrowerPhone: string; principalAmount: number }>> {
+  ): Promise<(LoanSchedule & { borrowerName: string; borrowerPhone: string; principalAmount: number })[]> {
     const db = await getDatabase();
     const rows = await db.getAllAsync<any>(
       `SELECT 

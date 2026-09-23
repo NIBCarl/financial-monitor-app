@@ -76,7 +76,7 @@ export default function DashboardScreen() {
   });
 
   const [schedules, setSchedules] = useState<
-    Array<LoanSchedule & { borrowerName: string; borrowerPhone: string; principalAmount: number }>
+    (LoanSchedule & { borrowerName: string; borrowerPhone: string; principalAmount: number })[]
   >([]);
   const [refreshing, setRefreshing] = useState(false);
 
